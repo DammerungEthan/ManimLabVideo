@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QListWidget, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox,
-    QVBoxLayout, QWidget, QLineEdit, QFormLayout, QCheckBox, QComboBox,
+    QVBoxLayout, QWidget, QLineEdit, QFormLayout, QCheckBox, QComboBox, QScrollBar,
 )
 
 from manim_editor.models.project import new_project
@@ -28,7 +28,16 @@ class MainWindow(QMainWindow):
         body=QHBoxLayout(); center=QVBoxLayout(); self.preview=Preview(self.state); center.addWidget(self.preview,1)
         controls=QHBoxLayout(); self.play_btn=QPushButton('▶ Reproducir'); self.play_btn.clicked.connect(self.toggle_play); controls.addWidget(self.play_btn)
         self.slider=QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0,100); self.slider.setValue(38); self.slider.valueChanged.connect(self.seek); controls.addWidget(self.slider,1); center.addLayout(controls)
-        self.timeline=Timeline(self.state, self.seek, self.update_views); center.addWidget(self.timeline); body.addLayout(center,1)
+        self.timecode=QLabel('00:00:03:24 / 00:00:10:00'); self.timecode.setMinimumWidth(190); controls.addWidget(self.timecode)
+        timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); timeline_row.addWidget(self.timeline,1)
+        self.track_scroll=QScrollBar(Qt.Orientation.Vertical); self.track_scroll.valueChanged.connect(self.timeline.set_row_offset); self.track_scroll.setSingleStep(1); timeline_row.addWidget(self.track_scroll)
+        center.addLayout(timeline_row)
+        zoom_row=QHBoxLayout(); add_track=QPushButton('+ Pista'); add_track.clicked.connect(self.add_track); zoom_row.addWidget(add_track); zoom_row.addWidget(QLabel('Zoom timeline'))
+        for label,factor in [('−',1.25),('+',0.8)]:
+            button=QPushButton(label); button.clicked.connect(lambda _=False,f=factor:self.timeline.zoom(f)); zoom_row.addWidget(button)
+        zoom_row.addStretch(); center.addLayout(zoom_row)
+        self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset); center.addWidget(self.timeline_scroll)
+        self._update_timeline_scroll(); body.addLayout(center,1)
         side=QVBoxLayout(); side.addWidget(QLabel('OBJETOS')); self.objects=QListWidget(); self.objects.currentRowChanged.connect(self.select_object); side.addWidget(self.objects)
         object_actions=QHBoxLayout(); add_btn=QPushButton('+ Gráfica'); add_btn.clicked.connect(self.add_graph); object_actions.addWidget(add_btn); delete_btn=QPushButton('Eliminar'); delete_btn.clicked.connect(self.delete_object); object_actions.addWidget(delete_btn); side.addLayout(object_actions)
         form=QFormLayout(); self.name=QLineEdit(); self.expr=QLineEdit(); self.start=QSpinBox(); self.start.setRange(0,999); self.length=QSpinBox(); self.length.setRange(1,999); self.color_btn=QPushButton('Elegir color'); self.color_btn.clicked.connect(self.choose_color)
@@ -71,18 +80,36 @@ class MainWindow(QMainWindow):
         if row>=0:
             c=QColorDialog.getColor(QColor(self.state['objects'][row]['color']),self)
             if c.isValid(): self.state['objects'][row]['color']=c.name(); self.select_object(row); self.update_views()
-    def update_views(self): self.preview.update(); self.timeline.update()
-    def seek(self,v): self.slider.blockSignals(True); self.slider.setValue(v); self.slider.blockSignals(False); self.preview.progress=max(.001,v/100); self.timeline.position=v; self.update_views()
+    def update_views(self):
+        self.state['duration']=max([self.state['duration']]+[o['start']+o['duration'] for o in self.state['objects']])
+        self.preview.update(); self.timeline.update(); self._update_timeline_scroll()
+    def _update_timeline_scroll(self):
+        self.timeline_scroll.setRange(0,1000000); self.timeline_scroll.setPageStep(self.timeline.visible_seconds)
+        self.timeline.tracks=self.state.setdefault('tracks',['Pista 1'])
+        maximum=max(0,len(self.timeline.tracks)-self.timeline.visible_rows)
+        self.track_scroll.setRange(0,maximum); self.track_scroll.setPageStep(self.timeline.visible_rows); self.track_scroll.setSingleStep(1)
+        self.timeline.set_row_offset(min(self.track_scroll.value(),maximum))
+    def add_track(self):
+        self.timeline.add_track()
+        self._update_timeline_scroll()
+    def seek(self,v):
+        seconds=v if isinstance(v,float) else self.state['duration']*v/100
+        seconds=max(0,min(self.state['duration'],seconds)); self.slider.blockSignals(True); self.slider.setValue(round(seconds/max(1,self.state['duration'])*100)); self.slider.blockSignals(False)
+        self.preview.progress=seconds/max(1,self.state['duration']); self.timeline.position=seconds; self.update_views()
+        frame=round(seconds*30); total=round(self.state['duration']*30)
+        def tc(n):
+            s,f=divmod(n,30); h,s=divmod(s,3600); m,s=divmod(s,60); return f'{h:02d}:{m:02d}:{s:02d}:{f:02d}'
+        self.timecode.setText(f'{tc(frame)} / {tc(total)}')
     def toggle_play(self):
         self.playing=not self.playing; self.play_btn.setText('❚❚ Pausar' if self.playing else '▶ Reproducir'); self.timer.start() if self.playing else self.timer.stop()
     def tick(self): self.seek((self.slider.value()+1)%101)
-    def new_project(self): self.state=new_project(); self.path=None; self.preview.state=self.state; self.timeline.state=self.state; self.refresh_objects()
+    def new_project(self): self.state=new_project(); self.path=None; self.preview.state=self.state; self.timeline.state=self.state; self.timeline.set_scroll_offset(0); self._update_timeline_scroll(); self.refresh_objects()
     def open_project(self):
         path,_=QFileDialog.getOpenFileName(self,'Abrir proyecto','','Manim Editor (*.manimproj);;JSON (*.json)')
         if not path:return
         try:
             data=load_project(path)
-            self.state=data; self.path=Path(path); self.preview.state=self.state; self.timeline.state=self.state; self.set_format_control(); self.refresh_objects()
+            self.state=data; self.path=Path(path); self.preview.state=self.state; self.timeline.state=self.state; self._update_timeline_scroll(); self.set_format_control(); self.refresh_objects()
         except (OSError,ValueError,AssertionError,KeyError) as e: QMessageBox.critical(self,'No se pudo abrir',str(e))
     def save_project(self):
         if not self.path:

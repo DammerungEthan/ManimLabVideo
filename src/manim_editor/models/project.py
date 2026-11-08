@@ -8,6 +8,7 @@ DEFAULT_PROJECT = {
     "format": "youtube",
     "width": 1920,
     "height": 1080,
+    "tracks": ["Pista 1"],
     "objects": [
         {"name": "Gráfica seno", "kind": "graph", "expression": "sin(x)", "color": "#65d6ff", "start": 0, "duration": 8, "visible": True},
         {"name": "Ejes", "kind": "axes", "expression": "", "color": "#8290a5", "start": 0, "duration": 10, "visible": True},
@@ -27,10 +28,14 @@ def normalize_project(data: dict) -> dict:
         raise ValueError("El archivo no contiene un proyecto válido.")
     project = new_project()
     project.update(data)
+    project.setdefault("tracks", ["Pista 1"])
     for obj in project["objects"]:
         obj.setdefault("visible", True)
         obj.setdefault("start", 0)
         obj.setdefault("duration", project["duration"])
         obj.setdefault("color", "#65d6ff")
         obj.setdefault("expression", "")
+        obj.setdefault("track", "Pista 1")
+        if obj["track"] not in project["tracks"]:
+            project["tracks"].append(obj["track"])
     return project
