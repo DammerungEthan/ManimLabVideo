@@ -1,0 +1,10 @@
+{
+  "git.autofetch": true,
+  "git.confirmSync": true,
+  "git.enableSmartCommit": false,
+  "git.suggestSmartCommit": false,
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/src"
+  ],
+  "python.terminal.activateEnvironment": true
+}

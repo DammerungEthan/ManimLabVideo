@@ -3,7 +3,7 @@ import math
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QPushButton, QWidget
 
 
 class Preview(QWidget):
@@ -12,6 +12,81 @@ class Preview(QWidget):
         self.state = state
         self.progress = 0.38
         self.setMinimumSize(420, 270)
+        self._expanded = False
+        self._original_parent = None
+        self._original_layout = None
+        self._original_index = -1
+        self._original_window_flags = self.windowFlags()
+
+        self.size_button = QPushButton("⛶", self)
+        self.size_button.setToolTip("Ampliar vista previa")
+        self.size_button.setAccessibleName("Ampliar vista previa")
+        self.size_button.setFixedSize(36, 32)
+        self.size_button.setStyleSheet(
+            "QPushButton { background: #202735; color: #e7ebf2; "
+            "border: 1px solid #536174; border-radius: 5px; font-size: 18px; }"
+            "QPushButton:hover { background: #354052; }"
+        )
+        self.size_button.clicked.connect(self.toggle_size)
+        self._position_size_button()
+
+    def _position_size_button(self):
+        self.size_button.move(self.width() - self.size_button.width() - 10, 10)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_size_button()
+
+    def _find_containing_layout(self, layout):
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item.widget() is self:
+                return layout, index
+            child_layout = item.layout()
+            if child_layout is not None:
+                result = self._find_containing_layout(child_layout)
+                if result is not None:
+                    return result
+        return None
+
+    def toggle_size(self):
+        if self._expanded:
+            self._restore_size()
+        else:
+            self._expand_size()
+
+    def _expand_size(self):
+        parent = self.parentWidget()
+        result = self._find_containing_layout(parent.layout()) if parent and parent.layout() else None
+        if result is None:
+            return
+
+        self._original_parent = parent
+        self._original_layout, self._original_index = result
+        self._original_layout.removeWidget(self)
+        self._original_window_flags = self.windowFlags()
+        self.setParent(parent, Qt.WindowType.Window)
+        self.setWindowTitle("Vista previa · Manim Editor")
+        self._expanded = True
+        self.size_button.setText("❐")
+        self.size_button.setToolTip("Volver al tamaño original")
+        self.size_button.setAccessibleName("Volver al tamaño original")
+        self.showMaximized()
+
+    def _restore_size(self):
+        parent = self._original_parent
+        layout = self._original_layout
+        if parent is None or layout is None:
+            return
+
+        self.setParent(parent, self._original_window_flags)
+        layout.insertWidget(self._original_index, self, 1)
+        self._expanded = False
+        self.size_button.setText("⛶")
+        self.size_button.setToolTip("Ampliar vista previa")
+        self.size_button.setAccessibleName("Ampliar vista previa")
+        self.show()
+        self.update()
 
     def paintEvent(self, _event):
         p = QPainter(self)

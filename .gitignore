@@ -22,6 +22,8 @@ dist/
 # IDE y sistema
 .idea/
 .vscode/
+!.vscode/
+!.vscode/*.json
 .DS_Store
 Thumbs.db
 
