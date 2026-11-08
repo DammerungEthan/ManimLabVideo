@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
         body=QHBoxLayout(); center=QVBoxLayout(); self.preview=Preview(self.state); center.addWidget(self.preview,1)
         controls=QHBoxLayout(); self.play_btn=QPushButton('▶ Reproducir'); self.play_btn.clicked.connect(self.toggle_play); controls.addWidget(self.play_btn)
         self.slider=QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0,100); self.slider.setValue(38); self.slider.valueChanged.connect(self.seek); controls.addWidget(self.slider,1); center.addLayout(controls)
-        self.timeline=Timeline(self.state, self.seek); center.addWidget(self.timeline); body.addLayout(center,1)
+        self.timeline=Timeline(self.state, self.seek, self.update_views); center.addWidget(self.timeline); body.addLayout(center,1)
         side=QVBoxLayout(); side.addWidget(QLabel('OBJETOS')); self.objects=QListWidget(); self.objects.currentRowChanged.connect(self.select_object); side.addWidget(self.objects)
         object_actions=QHBoxLayout(); add_btn=QPushButton('+ Gráfica'); add_btn.clicked.connect(self.add_graph); object_actions.addWidget(add_btn); delete_btn=QPushButton('Eliminar'); delete_btn.clicked.connect(self.delete_object); object_actions.addWidget(delete_btn); side.addLayout(object_actions)
         form=QFormLayout(); self.name=QLineEdit(); self.expr=QLineEdit(); self.start=QSpinBox(); self.start.setRange(0,999); self.length=QSpinBox(); self.length.setRange(1,999); self.color_btn=QPushButton('Elegir color'); self.color_btn.clicked.connect(self.choose_color)
