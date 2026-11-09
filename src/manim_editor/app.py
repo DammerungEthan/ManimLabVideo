@@ -1,13 +1,18 @@
 """Prototipo funcional de editor de escenas con persistencia JSON."""
 import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QListWidget, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter,
     QVBoxLayout, QWidget, QLineEdit, QFormLayout, QCheckBox, QComboBox, QScrollBar,
+    QProgressDialog,
 )
 
 from manim_editor.models.project import new_project
@@ -23,8 +28,12 @@ class MainWindow(QMainWindow):
         root=QWidget(); root.setObjectName('root'); outer=QVBoxLayout(root); outer.setContentsMargins(8,8,8,8)
         bar=QHBoxLayout(); title=QLabel('✦  MANIM EDITOR'); title.setStyleSheet('font-size:18px;font-weight:700'); bar.addWidget(title); self.project_label=QLabel(self.state['name']); bar.addWidget(self.project_label); bar.addStretch()
         bar.addWidget(QLabel('Formato')); self.format_box=QComboBox(); self.format_box.addItem('YouTube · 16:9',('youtube',1920,1080)); self.format_box.addItem('Reels / Shorts · 9:16',('vertical',1080,1920)); self.format_box.currentIndexChanged.connect(self.change_format); bar.addWidget(self.format_box)
-        for text,fn in [('↶',self.undo),('↷',self.redo),('Nuevo',self.new_project),('Abrir',self.open_project),('Guardar',self.save_project)]:
+        for text,fn in [('↶',self.undo),('↷',self.redo),('Nuevo',self.new_project),('Abrir',self.open_project)]:
             b=QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
+        save_actions=QVBoxLayout(); save_actions.setSpacing(2)
+        save_button=QPushButton('Guardar'); save_button.clicked.connect(self.save_project); save_actions.addWidget(save_button)
+        export_button=QPushButton('Exportar MP4'); export_button.clicked.connect(self.export_video); save_actions.addWidget(export_button)
+        bar.addLayout(save_actions)
         outer.addLayout(bar)
         body=QHBoxLayout(); center=QVBoxLayout(); self.preview=Preview(self.state)
         self.play_btn=QPushButton('▶'); self.play_btn.setToolTip('Reproducir'); self.play_btn.setFixedWidth(32); self.play_btn.clicked.connect(self.toggle_play)
@@ -154,6 +163,109 @@ class MainWindow(QMainWindow):
         try:
             self.state['name']=self.path.stem; save_project(self.path,self.state); self.project_label.setText(self.path.name)
         except OSError as e: QMessageBox.critical(self,'No se pudo guardar',str(e))
+
+    def export_video(self):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            QMessageBox.warning(self,'Exportar MP4','No se encontró ffmpeg. Instálalo y vuelve a intentarlo.')
+            return
+
+        output_path,_=QFileDialog.getSaveFileName(self,'Exportar video MP4','video.mp4','Video MP4 (*.mp4)')
+        if not output_path:return
+        if not output_path.lower().endswith('.mp4'):
+            output_path += '.mp4'
+
+        width=max(1,int(self.state.get('width',1920)))
+        height=max(1,int(self.state.get('height',1080)))
+        duration=max(0.1,float(self.state.get('duration',10)))
+        fps=30
+        frame_count=max(1,int(round(duration*fps)))
+        temp_path=None
+        process=None
+        canceled=False
+        error_message=None
+        was_playing=self.timer.isActive()
+        self.timer.stop()
+        progress=QProgressDialog('Renderizando fotogramas…','Cancelar',0,frame_count,self)
+        progress.setWindowTitle('Exportar video MP4')
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+
+        try:
+            output_directory=os.path.dirname(os.path.abspath(output_path))
+            with tempfile.NamedTemporaryFile(prefix='.manim-editor-',suffix='.mp4',dir=output_directory,delete=False) as temporary:
+                temp_path=temporary.name
+
+            command=[
+                ffmpeg,'-hide_banner','-loglevel','error','-y',
+                '-f','rawvideo','-pixel_format','rgba','-video_size',f'{width}x{height}',
+                '-framerate',str(fps),'-i','pipe:0','-an','-c:v','libx264',
+                '-preset','ultrafast','-crf','18','-pix_fmt','yuv420p',
+                '-movflags','+faststart',temp_path,
+            ]
+            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+
+            render_preview=Preview(self.state)
+            render_preview.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,True)
+            render_preview.resize(width+36,height+48)
+            render_preview.selected_index=None
+            render_preview.size_button.hide()
+            render_preview.text_button.hide()
+            render_preview.show()
+            QApplication.processEvents()
+
+            for frame_number in range(frame_count):
+                if progress.wasCanceled():
+                    canceled=True
+                    break
+
+                render_preview.progress=frame_number/max(1,frame_count-1)
+                image=QImage(width+36,height+48,QImage.Format.Format_RGBA8888)
+                image.fill(QColor('#000000'))
+                painter=QPainter(image)
+                try:
+                    render_preview.render(painter,QPoint(0,0))
+                finally:
+                    painter.end()
+                frame=image.copy(18,0,width,height)
+                process.stdin.write(frame.bits().tobytes())
+                progress.setValue(frame_number+1)
+                QApplication.processEvents()
+
+            if canceled:
+                process.stdin.close()
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill(); process.wait()
+            else:
+                process.stdin.close()
+                error_output=process.stderr.read().decode('utf-8',errors='replace').strip()
+                return_code=process.wait()
+                if return_code:
+                    raise RuntimeError(error_output or f'ffmpeg terminó con código {return_code}.')
+                os.replace(temp_path,output_path)
+                temp_path=None
+        except (OSError,RuntimeError,ValueError) as error:
+            error_message=str(error)
+            if process and process.poll() is None:
+                process.kill(); process.wait()
+        finally:
+            progress.close()
+            if was_playing:
+                self.timer.start()
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+        if error_message:
+            QMessageBox.critical(self,'No se pudo exportar el video',error_message)
+        elif canceled:
+            QMessageBox.information(self,'Exportación cancelada','Se canceló la exportación.')
+        else:
+            QMessageBox.information(self,'Video exportado',f'El video se guardó en:\n{output_path}')
 
 def main():
     app=QApplication(sys.argv); app.setApplicationName('Manim Editor'); w=MainWindow(); w.show(); return app.exec()
