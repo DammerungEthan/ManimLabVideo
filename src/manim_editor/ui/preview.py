@@ -5,7 +5,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-    QLineEdit, QPushButton, QScrollBar, QSpinBox, QSplitter, QWidget,
+    QLabel, QLineEdit, QPushButton, QScrollBar, QSpinBox, QSplitter, QWidget,
 )
 
 
@@ -73,17 +73,21 @@ class Preview(QWidget):
             "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: #3a3a3a; }"
         )
         self.zoom_bar.valueChanged.connect(self.set_zoom)
+        self.zoom_label = QLabel(f"{self.zoom_level}%", self)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setStyleSheet("color: #d0d0d0; font-size: 11px;")
+        self.zoom_label.setFixedSize(42, 20)
         self._position_size_button()
 
     def _position_size_button(self):
         render_only = self.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
-        for control in (self.size_button, self.text_button, self.zoom_bar):
+        for control in (self.size_button, self.text_button, self.zoom_bar, self.zoom_label):
             control.setVisible(not render_only)
         if render_only:
             return
         right = self.width() - 8
         button_x = right - self.size_button.width()
-        first_y = (self.height() - self.size_button.height() - self.text_button.height() - 8) // 2
+        first_y = 8
         self.size_button.move(button_x, first_y)
         self.text_button.move(
             right - self.text_button.width(),
@@ -91,12 +95,17 @@ class Preview(QWidget):
         )
         self.zoom_bar.move(
             self.width() - self.zoom_bar.width() - 8,
-            self.height() - self.zoom_bar.height() - 8,
+            self.height() - self.zoom_bar.height() - self.zoom_label.height() - 12,
+        )
+        self.zoom_label.move(
+            self.width() - self.zoom_label.width() - 8,
+            self.height() - self.zoom_label.height() - 4,
         )
 
     def set_zoom(self, value):
         self.zoom_level = value
         self.zoom_bar.setToolTip(f"Zoom de la vista previa: {value} %")
+        self.zoom_label.setText(f"{value}%")
         self.update()
 
     def _preview_geometry(self):
@@ -286,6 +295,9 @@ class Preview(QWidget):
         for widget in view_window.findChildren(QWidget):
             if widget is not self and getattr(widget, "state", None) is self.state:
                 widget.update()
+        state_changed = getattr(view_window, "preview_state_changed", None)
+        if callable(state_changed):
+            state_changed()
 
     @staticmethod
     def _position_for(obj, index, text_index, frame):
@@ -391,6 +403,7 @@ class Preview(QWidget):
         else:
             self._resize_selected(obj, event.position(), frame)
         self.update()
+        self._update_related_views()
         event.accept()
 
     def _resize_selected(self, obj, point, frame):
@@ -518,6 +531,56 @@ class Preview(QWidget):
                 p.drawText(x, y + metrics.ascent(), expression)
                 bounds = QRectF(x, y, max(12.0, metrics.horizontalAdvance(expression)),
                                 max(12.0, metrics.height()))
+            elif kind == "point":
+                radius = max(4.0, 8.0 * float(obj.get("scale", 1.0)))
+                color = QColor(obj.get("color", "#ffbd69"))
+                p.setPen(QPen(color, 1))
+                p.setBrush(color)
+                bounds = QRectF(x - radius, y - radius, radius * 2, radius * 2)
+                p.drawEllipse(bounds)
+            elif kind in {"circle", "ellipse"}:
+                radius_x = scale * .45
+                radius_y = radius_x if kind == "circle" else radius_x * .58
+                bounds = QRectF(x - radius_x, y - radius_y, radius_x * 2, radius_y * 2)
+                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), 3))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(bounds)
+            elif kind in {"line", "vector", "arrow"}:
+                half_width = scale * .6
+                color = QColor(obj.get("color", "#65d6ff"))
+                p.setPen(QPen(color, 3))
+                p.drawLine(int(x - half_width), int(y), int(x + half_width), int(y))
+                if kind in {"vector", "arrow"}:
+                    head = max(8.0, scale * .10)
+                    p.drawLine(int(x + half_width), int(y), int(x + half_width - head), int(y - head * .65))
+                    p.drawLine(int(x + half_width), int(y), int(x + half_width - head), int(y + head * .65))
+                bounds = QRectF(x - half_width, y - scale * .12,
+                                half_width * 2, scale * .24)
+            elif kind == "polygon":
+                half_width = scale * .55
+                half_height = scale * .5
+                points = (
+                    (x, y - half_height),
+                    (x - half_width, y + half_height),
+                    (x + half_width, y + half_height),
+                )
+                color = QColor(obj.get("color", "#65d6ff"))
+                p.setPen(QPen(color, 3))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                for start, end in zip(points, points[1:] + points[:1]):
+                    p.drawLine(int(start[0]), int(start[1]), int(end[0]), int(end[1]))
+                bounds = QRectF(x - half_width, y - half_height,
+                                half_width * 2, half_height * 2)
+            elif kind == "table":
+                expression = obj.get("expression", "")
+                font = QFont("Sans Serif", 24)
+                metrics = QFontMetricsF(font)
+                bounds = QRectF(x, y, max(48.0, metrics.horizontalAdvance(expression) + 20), 48)
+                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(bounds)
+                p.setFont(font)
+                p.drawText(x + 10, y + 32, expression)
             else:
                 continue
 

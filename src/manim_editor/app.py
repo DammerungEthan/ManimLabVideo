@@ -1,4 +1,5 @@
 """Prototipo funcional de editor de escenas con persistencia JSON."""
+import ast
 import json
 import os
 import shutil
@@ -10,9 +11,9 @@ from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter,
+    QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter,
     QVBoxLayout, QWidget, QLineEdit, QFormLayout, QCheckBox, QComboBox, QScrollBar,
-    QProgressDialog,
+    QProgressDialog, QToolButton, QPlainTextEdit, QTabBar, QStackedWidget,
 )
 
 from manim_editor.models.project import new_project
@@ -26,14 +27,29 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Manim Editor'); self.resize(1360,850)
         self._undo_stack=[]; self._redo_stack=[]; self._last_snapshot=json.dumps(self.state,sort_keys=True)
         root=QWidget(); root.setObjectName('root'); outer=QVBoxLayout(root); outer.setContentsMargins(8,8,8,8)
-        bar=QHBoxLayout(); title=QLabel('✦  MANIM EDITOR'); title.setStyleSheet('font-size:18px;font-weight:700'); bar.addWidget(title); self.project_label=QLabel(self.state['name']); bar.addWidget(self.project_label); bar.addStretch()
+        bar=QHBoxLayout(); self.project_label=QLabel(self.state['name']); bar.addWidget(self.project_label); bar.addStretch()
+        self.workspace_tab_bar=QTabBar(); self.workspace_tab_bar.setExpanding(False); self.workspace_tab_bar.setDrawBase(False); self.workspace_tab_bar.setMovable(False)
+        self.workspace_tab_bar.addTab('▶  Video'); self.workspace_tab_bar.addTab('</>  Código Manim')
+        self.workspace_tab_bar.setStyleSheet('QTabBar::tab{background:#1b1d21;color:#aeb4bd;padding:7px 14px;border:1px solid #30343a;border-bottom:0;border-top-left-radius:6px;border-top-right-radius:6px;margin-right:3px} QTabBar::tab:selected{background:#292d33;color:#f1f4fa} QTabBar::tab:hover:!selected{background:#24272c}')
+        bar.addWidget(self.workspace_tab_bar)
         bar.addWidget(QLabel('Formato')); self.format_box=QComboBox(); self.format_box.addItem('YouTube · 16:9',('youtube',1920,1080)); self.format_box.addItem('Reels / Shorts · 9:16',('vertical',1080,1920)); self.format_box.currentIndexChanged.connect(self.change_format); bar.addWidget(self.format_box)
-        for text,fn in [('↶',self.undo),('↷',self.redo),('Nuevo',self.new_project),('Abrir',self.open_project)]:
+        for text,fn in [('↶',self.undo),('↷',self.redo)]:
             b=QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
-        save_actions=QVBoxLayout(); save_actions.setSpacing(2)
-        save_button=QPushButton('Guardar'); save_button.clicked.connect(self.save_project); save_actions.addWidget(save_button)
-        export_button=QPushButton('Exportar MP4'); export_button.clicked.connect(self.export_video); save_actions.addWidget(export_button)
-        bar.addLayout(save_actions)
+        file_menu=QMenu(self)
+        for text,fn in (
+            ('Nuevo',self.new_project),
+            ('Abrir',self.open_project),
+            ('Guardar',self.save_project),
+            ('Exportar MP4',self.export_video),
+        ):
+            action=file_menu.addAction(text)
+            action.triggered.connect(fn)
+        file_menu_button=QToolButton()
+        file_menu_button.setText('Archivo ▾')
+        file_menu_button.setMenu(file_menu)
+        file_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        file_menu_button.setToolTip('Nuevo, abrir, guardar o exportar el proyecto')
+        bar.addWidget(file_menu_button)
         outer.addLayout(bar)
         body=QHBoxLayout(); center=QVBoxLayout(); self.preview=Preview(self.state)
         self.play_btn=QPushButton('▶'); self.play_btn.setToolTip('Reproducir'); self.play_btn.setFixedWidth(32); self.play_btn.clicked.connect(self.toggle_play)
@@ -43,13 +59,31 @@ class MainWindow(QMainWindow):
         timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); timeline_row.addWidget(self.timeline,1)
         self.track_scroll=QScrollBar(Qt.Orientation.Vertical); self.track_scroll.valueChanged.connect(self.timeline.set_row_offset); self.track_scroll.setSingleStep(1); timeline_row.addWidget(self.track_scroll)
         self.timeline_area=QWidget(); self.timeline_area.setLayout(timeline_row)
-        self.vertical_split=QSplitter(Qt.Orientation.Vertical); self.vertical_split.setChildrenCollapsible(False); self.vertical_split.addWidget(self.preview); self.vertical_split.addWidget(self.timeline_area); self.vertical_split.setStretchFactor(0,1); self.vertical_split.setSizes([560,190]); center.addWidget(self.vertical_split,1)
+        self.vertical_split=QSplitter(Qt.Orientation.Vertical); self.vertical_split.setChildrenCollapsible(False); self.vertical_split.addWidget(self.preview); self.vertical_split.addWidget(self.timeline_area); self.vertical_split.setStretchFactor(0,1); self.vertical_split.setSizes([560,190])
         zoom_row=QHBoxLayout(); add_track=QPushButton('+ Pista'); add_track.clicked.connect(self.add_track); zoom_row.addWidget(add_track); remove_track=QPushButton('− Pista'); remove_track.clicked.connect(self.remove_track); zoom_row.addWidget(remove_track); zoom_row.addWidget(QLabel('Zoom'))
         for label,factor in [('−',1.25),('+',0.8)]:
             button=QPushButton(label); button.clicked.connect(lambda _=False,f=factor:self.timeline.zoom(f)); zoom_row.addWidget(button)
-        zoom_row.addStretch(); center.addLayout(zoom_row)
-        transport=QHBoxLayout(); transport.addWidget(self.play_btn); transport.addWidget(self.slider,1); transport.addWidget(self.timecode); transport.addWidget(self.trim_button); center.addLayout(transport)
-        self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset); center.addWidget(self.timeline_scroll)
+        zoom_row.addStretch()
+        transport=QHBoxLayout(); transport.addWidget(self.play_btn); transport.addWidget(self.slider,1); transport.addWidget(self.timecode); transport.addWidget(self.trim_button)
+        self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset)
+
+        video_page=QWidget(); video_layout=QVBoxLayout(video_page); video_layout.setContentsMargins(0,0,0,0)
+        video_layout.addWidget(self.vertical_split,1); video_layout.addLayout(zoom_row); video_layout.addLayout(transport); video_layout.addWidget(self.timeline_scroll)
+        code_page=QWidget(); code_layout=QVBoxLayout(code_page); code_layout.setContentsMargins(8,8,8,8)
+        self._code_view_dirty=False; self._updating_code_view=False
+        self.code_view=QPlainTextEdit(); self.code_view.setReadOnly(False); self.code_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.code_view.textChanged.connect(self._mark_code_view_edited)
+        self.code_view.setPlaceholderText('El código de Manim de esta escena aparecerá aquí.')
+        self.code_view.setStyleSheet('QPlainTextEdit{background:#15171b;color:#d8dee9;border:1px solid #363a40;border-radius:6px;padding:10px;font-family:monospace;font-size:13px;selection-background-color:#365f8c}')
+        self.code_status=QLabel('Edita el código para actualizar la previsualización.')
+        code_layout.addWidget(self.code_status)
+        code_layout.addWidget(self.code_view)
+        self._code_sync_timer=QTimer(self); self._code_sync_timer.setSingleShot(True); self._code_sync_timer.setInterval(350); self._code_sync_timer.timeout.connect(self.apply_code_to_preview)
+        self._applying_code=False
+        self._preview_sync_timer=QTimer(self); self._preview_sync_timer.setSingleShot(True); self._preview_sync_timer.setInterval(100); self._preview_sync_timer.timeout.connect(self._sync_preview_changes)
+        self.workspace_pages=QStackedWidget(); self.workspace_pages.addWidget(video_page); self.workspace_pages.addWidget(code_page)
+        self.workspace_tab_bar.currentChanged.connect(self.workspace_pages.setCurrentIndex)
+        center.addWidget(self.workspace_pages,1)
         self._update_timeline_scroll(); body.addLayout(center,1)
         side=QVBoxLayout(); side.addWidget(QLabel('AÑADIR ELEMENTO'))
         self.element_list=QListWidget(); self.element_list.addItems(['Gráficas: seno, coseno, tangente, x², exponencial, logaritmo','Texto y ecuación LaTeX','Punto','Vector','Recta','Círculo','Elipse','Polígono','Flecha','Ejes cartesianos','Plano cartesiano','Llaves y etiquetas','Imagen','Tabla','Grupo'])
@@ -62,7 +96,7 @@ class MainWindow(QMainWindow):
         side.addLayout(form); self.apply_btn=QPushButton('Aplicar cambios'); self.apply_btn.clicked.connect(self.apply_properties); side.addWidget(self.apply_btn); side.addStretch(); body.addLayout(side)
         outer.addLayout(body,1); self.setCentralWidget(root)
         self.setStyleSheet("QWidget#root{background:#111317;color:#e7e7e7;font-family:'Segoe UI',sans-serif} QFrame,QListWidget,QLineEdit,QSpinBox,QComboBox{border-radius:7px} QPushButton,QLineEdit,QSpinBox,QListWidget,QComboBox{background:#202226;color:#eee;border:1px solid #363a40;border-radius:7px;padding:5px} QPushButton:hover{background:#30343b} QSplitter::handle:vertical{background:#34363a;height:5px;border-radius:3px} QSplitter::handle:vertical:hover{background:#777} QScrollBar:vertical{background:transparent;width:8px;margin:0} QScrollBar::handle:vertical{background:#52565c;min-height:24px;border-radius:4px} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0} QScrollBar:horizontal{background:#1b1d21;height:8px} QScrollBar::handle:horizontal{background:#52565c;min-width:24px;border-radius:4px} QSlider::groove:horizontal{height:3px;background:#464646;border-radius:2px} QSlider::handle:horizontal{background:#f5bd32;width:11px;margin:-4px 0;border-radius:6px}")
-        self.timer=QTimer(self); self.timer.setInterval(40); self.timer.timeout.connect(self.tick); self.set_format_control(); self.refresh_objects()
+        self.timer=QTimer(self); self.timer.setInterval(40); self.timer.timeout.connect(self.tick); self.set_format_control(); self.refresh_objects(); self.refresh_code_view()
 
     def set_format_control(self):
         idx=1 if self.state.get('format')=='vertical' else 0
@@ -103,16 +137,382 @@ class MainWindow(QMainWindow):
         if row>=0:
             c=QColorDialog.getColor(QColor(self.state['objects'][row]['color']),self)
             if c.isValid(): self.state['objects'][row]['color']=c.name(); self.select_object(row); self.update_views()
+
+    def refresh_code_view(self, _index=None):
+        lines = [
+            'from manim import *',
+            'import numpy as np',
+            '',
+            '',
+            'class VideoManim(Scene):',
+            '    def construct(self):',
+            '        self.camera.background_color = "#000000"',
+        ]
+        width = max(1, int(self.state.get('width', 1920)))
+        height = max(1, int(self.state.get('height', 1080)))
+        scene_width = 14.222
+        scene_height = scene_width * height / width
+        frame_height = 1000 / (width / height)
+        total_duration = max(0.0, float(self.state.get('duration', 10)))
+        events = {}
+        supported = 0
+        text_index = 0
+
+        for index, obj in enumerate(self.state.get('objects', [])):
+            kind = obj.get('kind', '')
+            if kind == 'text':
+                text_index += 1
+            if not obj.get('visible', True):
+                continue
+
+            position = obj.get('position')
+            if not isinstance(position, dict):
+                if kind == 'text':
+                    position = {'x': 0.035, 'y': min(0.85, (36 + (text_index - 1) * 28) / frame_height)}
+                else:
+                    position = {'x': 0.52, 'y': 0.54}
+            x = (float(position.get('x', 0.5)) - 0.5) * scene_width
+            y = (0.5 - float(position.get('y', 0.5))) * scene_height
+            location = f'[{x:.3f}, {y:.3f}, 0]'
+            color = json.dumps(str(obj.get('color', '#65d6ff')))
+            variable = f'obj_{index + 1}'
+            expression = str(obj.get('expression', ''))
+            definition = None
+
+            if kind == 'axes':
+                definition = f'{variable} = Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], tips=False).set_color({color}).move_to({location})'
+            elif kind == 'graph':
+                graph_functions = {
+                    'sin(x)': 'np.sin(x)',
+                    'cos(x)': 'np.cos(x)',
+                    'tan(x)': 'np.sin(x) * 0.5',
+                    'x^2': '(x - np.pi) ** 2 / 5 - 1',
+                    'exp(x)': 'np.exp(x)',
+                    'log(x)': 'np.log(np.maximum(x, 0.001))',
+                }
+                graph_expression = graph_functions.get(expression.strip().lower())
+                if graph_expression:
+                    definition = (
+                        f'graph_axes_{index + 1} = Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], tips=False)\n'
+                        f'        {variable} = graph_axes_{index + 1}.plot(lambda x: {graph_expression}, '
+                        f'x_range=[-7, 7], color={color}).move_to({location})'
+                    )
+            elif kind == 'text':
+                font = json.dumps(str(obj.get('font_family', 'Noto Serif')))
+                weight = 'BOLD' if int(obj.get('font_weight', 400)) >= 700 else 'NORMAL'
+                definition = (
+                    f'{variable} = Text({json.dumps(expression, ensure_ascii=False)}, '
+                    f'font={font}, font_size={int(obj.get("font_size", 42))}, '
+                    f'weight={json.dumps(weight)}, color={color}).move_to({location})'
+                )
+            elif kind == 'point':
+                definition = f'{variable} = Dot(point={location}, color={color})'
+            elif kind == 'vector':
+                definition = f'{variable} = Arrow(ORIGIN, RIGHT, color={color}).move_to({location})'
+            elif kind == 'line':
+                definition = f'{variable} = Line(LEFT, RIGHT, color={color}).move_to({location})'
+            elif kind == 'circle':
+                definition = f'{variable} = Circle(color={color}).move_to({location})'
+            elif kind == 'ellipse':
+                definition = f'{variable} = Ellipse(width=2, height=1, color={color}).move_to({location})'
+            elif kind == 'arrow':
+                definition = f'{variable} = Arrow(LEFT, RIGHT, color={color}).move_to({location})'
+            elif kind == 'polygon':
+                definition = f'{variable} = Polygon(LEFT, UP, RIGHT, color={color}).move_to({location})'
+            elif kind == 'table':
+                definition = f'{variable} = Table([[{json.dumps(expression, ensure_ascii=False)}]], include_outer_lines=True).move_to({location})'
+            elif kind == 'group':
+                definition = f'{variable} = VGroup()'
+
+            if definition is None:
+                lines.append(f'        # No hay conversión Manim disponible para el tipo: {kind or "desconocido"}.')
+                continue
+
+            object_scale=float(obj.get('scale',1.0))
+            if kind not in {'text','group'} and object_scale != 1.0:
+                definition += f'.scale({object_scale:.4f})'
+
+            supported += 1
+            lines.extend('        ' + part.lstrip() for part in definition.splitlines())
+            start = max(0.0, float(obj.get('start', 0)))
+            duration = max(0.0, float(obj.get('duration', 0)))
+            end = min(total_duration, start + duration)
+            if start <= total_duration and end >= start:
+                events.setdefault(min(start, total_duration), []).append((1, f'self.add({variable})'))
+                events.setdefault(end, []).append((0, f'self.remove({variable})'))
+
+        lines.extend(['', '        # Aparición y desaparición según la línea de tiempo.'])
+        current_time = 0.0
+        for event_time in sorted(events):
+            delta = event_time - current_time
+            if delta > 0:
+                lines.append(f'        self.wait({delta:.3f})')
+            for _, statement in sorted(events[event_time]):
+                lines.append(f'        {statement}')
+            current_time = event_time
+        if total_duration > current_time:
+            lines.append(f'        self.wait({total_duration - current_time:.3f})')
+        if supported == 0:
+            lines.append('        self.wait(1)')
+        self._updating_code_view=True
+        self.code_view.setPlainText('\n'.join(lines) + '\n')
+        self._updating_code_view=False
+        self._code_view_dirty=False
+        self.code_status.setText('Código sincronizado con la previsualización.')
+        self.code_status.setStyleSheet('color:#aeb4bd')
+
+    def _mark_code_view_edited(self):
+        if not self._updating_code_view:
+            self._code_view_dirty=True
+            self.code_status.setText('Aplicando cambios a la previsualización…')
+            self.code_status.setStyleSheet('color:#d8c27a')
+            self._code_sync_timer.start()
+
+    def preview_state_changed(self):
+        self._preview_sync_timer.start()
+
+    def _sync_preview_changes(self):
+        self.update_views()
+
+    @staticmethod
+    def _code_literal(node, default=None):
+        try:
+            return ast.literal_eval(node)
+        except (ValueError, TypeError, SyntaxError):
+            return default
+
+    @staticmethod
+    def _manim_call_name(node):
+        if isinstance(node, ast.Call):
+            function = node.func
+            if isinstance(function, ast.Name):
+                return function.id
+            if isinstance(function, ast.Attribute):
+                return function.attr
+        return ''
+
+    def _read_manim_object(self, node, variable):
+        transforms=[]
+        while (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {'move_to', 'scale', 'set_color'}
+        ):
+            transforms.append(node)
+            node=node.func.value
+
+        call_name=self._manim_call_name(node)
+        if not isinstance(node, ast.Call):
+            return None
+        keywords={item.arg:item.value for item in node.keywords if item.arg}
+        args=node.args
+        color=self._code_literal(keywords.get('color'), '#65d6ff')
+        expression=''
+        kind=None
+        obj={'name':variable.replace('_',' ').title(),'kind':'','expression':'','color':color,
+             'start':0,'duration':1,'visible':True,'track':'Pista 1','position':{'x':0.52,'y':0.54},'scale':1.0}
+
+        if call_name in {'Text','MathTex','Tex'}:
+            kind='text'
+            expression=self._code_literal(args[0], '') if args else ''
+            obj.update(
+                name=str(expression)[:24] or obj['name'],
+                font_family=self._code_literal(keywords.get('font'), 'Noto Serif'),
+                font_size=int(self._code_literal(keywords.get('font_size'), 42)),
+                font_weight=700 if self._code_literal(keywords.get('weight'), 'NORMAL') == 'BOLD' else 400,
+            )
+        elif call_name=='Axes':
+            kind='axes'
+        elif call_name=='plot':
+            kind='graph'
+            if args and isinstance(args[0], ast.Lambda):
+                body=args[0].body
+                if isinstance(body, ast.Call):
+                    function=self._manim_call_name(body)
+                    expression={'sin':'sin(x)','cos':'cos(x)','tan':'tan(x)','exp':'exp(x)','log':'log(x)'}.get(function,'sin(x)')
+                else:
+                    calls={self._manim_call_name(item) for item in ast.walk(body) if isinstance(item,ast.Call)}
+                    has_square=any(
+                        isinstance(item,ast.BinOp) and isinstance(item.op,ast.Pow)
+                        and self._code_literal(item.right)==2
+                        for item in ast.walk(body)
+                    )
+                    if has_square:
+                        expression='x^2'
+                    elif 'sin' in calls and any(isinstance(item,ast.BinOp) and isinstance(item.op,ast.Mult) for item in ast.walk(body)):
+                        expression='tan(x)'
+                    else:
+                        expression='sin(x)'
+        else:
+            kind={
+                'Dot':'point','Arrow':'arrow','Line':'line','Circle':'circle',
+                'Ellipse':'ellipse','Polygon':'polygon','Table':'table','MathTable':'table','VGroup':'group',
+            }.get(call_name)
+        if kind is None:
+            return None
+        obj['kind']=kind
+        obj['expression']=str(expression)
+        if kind=='table' and args:
+            table_data=self._code_literal(args[0],[])
+            if table_data and isinstance(table_data[0],(list,tuple)) and table_data[0]:
+                obj['expression']=str(table_data[0][0])
+
+        point_node=keywords.get('point')
+        if kind=='point' and point_node is not None:
+            point=self._code_literal(point_node)
+            if isinstance(point,(list,tuple)) and len(point)>=2:
+                frame_width=14.222
+                frame_height=frame_width*max(1,int(self.state.get('height',1080)))/max(1,int(self.state.get('width',1920)))
+                obj['position']={'x':max(0,min(1,float(point[0])/frame_width+0.5)), 'y':max(0,min(1,0.5-float(point[1])/frame_height))}
+
+        for transform in reversed(transforms):
+            method=transform.func.attr
+            value=transform.args[0] if transform.args else None
+            if method=='set_color':
+                obj['color']=self._code_literal(value, obj['color'])
+            elif method=='scale':
+                obj['scale']=float(self._code_literal(value, 1.0))
+            elif method=='move_to':
+                point=self._code_literal(value)
+                if isinstance(point, (list, tuple)) and len(point)>=2:
+                    x,y=float(point[0]),float(point[1])
+                elif isinstance(value, ast.Name):
+                    x,y={'ORIGIN':(0,0),'UP':(0,1),'DOWN':(0,-1),'LEFT':(-1,0),'RIGHT':(1,0)}.get(value.id,(0,0))
+                else:
+                    x,y=0,0
+                frame_width=14.222
+                frame_height=frame_width*max(1,int(self.state.get('height',1080)))/max(1,int(self.state.get('width',1920)))
+                obj['position']={'x':max(0,min(1,x/frame_width+0.5)), 'y':max(0,min(1,0.5-y/frame_height))}
+        if kind=='text' and call_name in {'Text','MathTex','Tex'} and not transforms:
+            obj['position']={'x':0.04,'y':0.1}
+        return obj
+
+    def _parse_manim_scene(self, source):
+        tree=ast.parse(source)
+        construct=next(
+            (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name=='construct'),
+            None,
+        )
+        if construct is None:
+            raise ValueError('No se encontró el método construct(self) de la escena.')
+
+        objects={}
+        current_objects=self.state.get('objects',[])
+        tracks_by_variable={
+            f'obj_{index + 1}':obj.get('track','Pista 1')
+            for index,obj in enumerate(current_objects)
+        }
+        tracks_by_name={
+            obj.get('name'):obj.get('track','Pista 1')
+            for obj in current_objects if obj.get('name')
+        }
+        for statement in construct.body:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                continue
+            target=statement.targets[0] if isinstance(statement, ast.Assign) and statement.targets else getattr(statement,'target',None)
+            value=statement.value
+            if not isinstance(target, ast.Name) or target.id.startswith('graph_axes_'):
+                continue
+            parsed=self._read_manim_object(value,target.id)
+            if parsed is not None:
+                parsed['track']=tracks_by_variable.get(
+                    target.id,
+                    tracks_by_name.get(parsed.get('name'), self.state.get('tracks',['Pista 1'])[0]),
+                )
+                objects[target.id]=parsed
+
+        starts={}
+        active={}
+        timeline=[]
+        current_time=0.0
+
+        def names_in(node):
+            return list(dict.fromkeys(item.id for item in ast.walk(node) if isinstance(item, ast.Name) and item.id in objects))
+
+        for statement in construct.body:
+            if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+                continue
+            call=statement.value
+            if not isinstance(call.func, ast.Attribute) or not isinstance(call.func.value, ast.Name) or call.func.value.id!='self':
+                continue
+            action=call.func.attr
+            if action=='wait':
+                current_time+=max(0.0,float(self._code_literal(call.args[0],1.0))) if call.args else 1.0
+            elif action=='add':
+                for argument in call.args:
+                    for name in names_in(argument):
+                        starts[name]=current_time
+                        active[name]=True
+            elif action=='remove':
+                for argument in call.args:
+                    for name in names_in(argument):
+                        if name in active:
+                            obj=objects[name]
+                            obj['start']=starts.get(name,0.0)
+                            obj['duration']=max(0.1,current_time-obj['start'])
+                            timeline.append(obj)
+                            active.pop(name,None)
+            elif action=='play':
+                run_time=next((float(self._code_literal(item.value,1.0)) for item in call.keywords if item.arg=='run_time'),1.0)
+                for argument in call.args:
+                    animation=self._manim_call_name(argument)
+                    for name in names_in(argument):
+                        if animation in {'FadeOut','Uncreate','Unwrite'}:
+                            if name in active:
+                                obj=objects[name]
+                                obj['start']=starts.get(name,0.0)
+                                obj['duration']=max(0.1,current_time+run_time-obj['start'])
+                                timeline.append(obj)
+                                active.pop(name,None)
+                        else:
+                            starts[name]=current_time
+                            active[name]=True
+                current_time+=max(0.0,run_time)
+
+        total_duration=max(1.0,current_time)
+        for name in active:
+            obj=objects[name]
+            obj['start']=starts.get(name,0.0)
+            obj['duration']=max(0.1,total_duration-obj['start'])
+            timeline.append(obj)
+        return timeline,total_duration
+
+    def apply_code_to_preview(self):
+        try:
+            objects,duration=self._parse_manim_scene(self.code_view.toPlainText())
+        except (SyntaxError, ValueError, TypeError, OverflowError) as error:
+            detail=f'Error en el código; se conserva la última previsualización válida: {error}'
+            self.code_status.setText(detail)
+            self.code_status.setStyleSheet('color:#ff8585')
+            return
+
+        self._applying_code=True
+        try:
+            self.state['objects']=objects
+            self.state['duration']=max(1.0,duration)
+            self.code_status.setText('Código aplicado a la previsualización.')
+            self.code_status.setStyleSheet('color:#9bd6a4')
+            self.refresh_objects()
+            self.preview.update()
+            self.timeline.update()
+            self._code_view_dirty=False
+        finally:
+            self._applying_code=False
+
     def update_views(self):
+        self.state['duration']=max([self.state['duration']]+[o['start']+o['duration'] for o in self.state['objects']])
         snapshot=json.dumps(self.state,sort_keys=True)
         if snapshot != self._last_snapshot:
             self._undo_stack.append(self._last_snapshot); self._undo_stack=self._undo_stack[-100:]; self._redo_stack.clear(); self._last_snapshot=snapshot
-        self.state['duration']=max([self.state['duration']]+[o['start']+o['duration'] for o in self.state['objects']])
+            if not self._applying_code and not self._code_view_dirty:
+                self.refresh_code_view()
         self.preview.update(); self.timeline.update(); self._update_timeline_scroll()
     def _restore_history(self, source, destination):
         if not source:return
         destination.append(json.dumps(self.state)); self.state=json.loads(source.pop()); self._last_snapshot=json.dumps(self.state,sort_keys=True)
         self.preview.state=self.state; self.timeline.state=self.state; self.refresh_objects()
+        if not self._code_view_dirty:
+            self.refresh_code_view()
     def undo(self): self._restore_history(self._undo_stack,self._redo_stack)
     def redo(self): self._restore_history(self._redo_stack,self._undo_stack)
     def _update_timeline_scroll(self):
