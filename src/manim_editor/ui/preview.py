@@ -41,6 +41,8 @@ class Preview(QWidget):
         self._rotation_origin_angle = 0.0
         self._resize_corner = None
         self._active_guides = {}
+        self._rendered_frame = QPixmap()
+        self._editing_enabled = True
         self.zoom_level = 100
 
         self.size_button = QPushButton("⛶", self)
@@ -133,6 +135,27 @@ class Preview(QWidget):
         self.zoom_level = value
         self.zoom_bar.setToolTip(f"Zoom de la vista previa: {value} %")
         self.zoom_label.setText(f"{value}%")
+        self.update()
+
+    def set_rendered_frame(self, frame):
+        """Muestra un fotograma del render real de Manim, si existe."""
+        self._rendered_frame = QPixmap(frame) if frame is not None else QPixmap()
+        self._object_bounds.clear()
+        self._object_frame_bounds.clear()
+        self._object_positions.clear()
+        self._object_rotation_anchors.clear()
+        self._object_selection_corners.clear()
+        self._object_alignment_centers.clear()
+        self.update()
+
+    def set_editing_enabled(self, enabled):
+        """Evita editar el fotograma anterior mientras el código está pendiente de render."""
+        self._editing_enabled = bool(enabled)
+        self.text_button.setEnabled(self._editing_enabled)
+        self.shape_button.setEnabled(self._editing_enabled)
+        if not self._editing_enabled:
+            self.selected_index = None
+            self._drag_mode = None
         self.update()
 
     def _preview_geometry(self):
@@ -479,6 +502,9 @@ class Preview(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        if not self._editing_enabled:
+            event.accept()
+            return
 
         point = event.position()
         self._drag_mode = None
@@ -693,13 +719,28 @@ class Preview(QWidget):
         self._object_rotation_anchors = {}
         self._object_selection_corners = {}
         self._object_alignment_centers = {}
+        rendered_frame = not self._rendered_frame.isNull()
+        if rendered_frame:
+            p.save()
+            p.setClipRect(viewport)
+            p.fillRect(frame_rect, QColor("#000000"))
+            p.drawPixmap(frame_rect, self._rendered_frame, QRectF(self._rendered_frame.rect()))
+            p.restore()
+            p.setPen(QPen(QColor("#536174"), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(frame_rect)
         # Dibuja los objetos en coordenadas del lienzo y guarda sus límites
         # para hit-testing, selección y redimensionado.
         p.save()
         p.setClipRect(viewport)
-        p.fillRect(frame_rect, QColor("#000000"))
+        if not rendered_frame:
+            p.fillRect(frame_rect, QColor("#000000"))
         p.translate(frame["x"], frame["y"])
         p.scale(frame["scale_x"], frame["scale_y"])
+        if rendered_frame:
+            # El video ya contiene estos objetos; dibujamos solo su geometría
+            # de selección para permitir moverlos sin duplicarlos en pantalla.
+            p.setOpacity(0)
 
         frame_width = frame["frame_width"]
         frame_height = frame["frame_height"]
@@ -723,7 +764,7 @@ class Preview(QWidget):
             if kind == "text":
                 pivot_font = QFont(
                     obj.get("font_family", "Sans Serif"),
-                    obj.get("font_size", 16),
+                    round(obj.get("font_size", 16) * float(obj.get("scale", 1.0))),
                     QFont.Weight(obj.get("font_weight", int(QFont.Weight.DemiBold))),
                 )
                 pivot_metrics = QFontMetricsF(pivot_font)
@@ -769,7 +810,7 @@ class Preview(QWidget):
             elif kind == "text":
                 font = QFont(
                     obj.get("font_family", "Sans Serif"),
-                    obj.get("font_size", 16),
+                    round(obj.get("font_size", 16) * float(obj.get("scale", 1.0))),
                     QFont.Weight(obj.get("font_weight", int(QFont.Weight.DemiBold))),
                 )
                 metrics = QFontMetricsF(font)

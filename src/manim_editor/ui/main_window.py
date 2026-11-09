@@ -1,32 +1,95 @@
-"""Prototipo funcional de editor de escenas con persistencia JSON."""
+"""Editor de proyectos y escenas Manim con previsualización integrada."""
 import ast
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtCore import QPoint, QRegularExpression, Qt, QTimer
+from PySide6.QtGui import (
+    QColor, QFont, QFontMetricsF, QImage, QPainter, QPixmap, QSyntaxHighlighter,
+    QTextCharFormat,
+)
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter,
     QVBoxLayout, QWidget, QLineEdit, QFormLayout, QCheckBox, QComboBox, QScrollBar,
-    QProgressDialog, QToolButton, QPlainTextEdit, QTabBar, QStackedWidget,
+    QProgressDialog, QToolButton, QPlainTextEdit, QTabBar, QStackedWidget, QDialog,
 )
 
 from manim_editor.models.project import new_project
 from manim_editor.services.project_io import load_project, save_project
+from manim_editor.services.manim_runner import ManimRenderWorker
 from manim_editor.ui.preview import Preview
 from manim_editor.ui.timeline import Timeline
+
+
+class PythonHighlighter(QSyntaxHighlighter):
+    """Resaltado ligero de sintaxis Python y nombres frecuentes de Manim."""
+
+    def __init__(self, document):
+        super().__init__(document)
+        self.rules = []
+        self._add_rule(
+            r"\b(False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b",
+            "#c792ea", True,
+        )
+        self._add_rule(
+            r"\b(Scene|ThreeDScene|MovingCameraScene|Text|MathTex|Tex|Axes|VGroup|Vector|Arrow|Line|Dot|Circle|Square|Rectangle|Ellipse|Polygon|NumberPlane|Table|ValueTracker|always_redraw|Create|Write|FadeIn|FadeOut|Transform|ReplacementTransform|Rotate|GrowArrow|DrawBorderThenFill|AnimationGroup|Succession|LaggedStart)\b",
+            "#82aaff", True,
+        )
+        self._add_rule(r"\b(self|super|np|numpy|math)\b", "#f78c6c")
+        self._add_rule(r"\b\d+(?:\.\d+)?\b", "#f78c6c")
+        self._add_rule(r"\b[A-Z][A-Z0-9_]*\b", "#ffcb6b")
+        self._add_rule(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'", "#c3e88d")
+        self._add_rule(r"#[^\n]*", "#697386")
+
+    def _add_rule(self, pattern, color, bold=False):
+        char_format = QTextCharFormat()
+        char_format.setForeground(QColor(color))
+        if bold:
+            char_format.setFontWeight(QFont.Weight.Bold)
+        self.rules.append((QRegularExpression(pattern), char_format))
+
+    def highlightBlock(self, text):
+        for expression, char_format in self.rules:
+            match = expression.globalMatch(text)
+            while match.hasNext():
+                result = match.next()
+                self.setFormat(result.capturedStart(), result.capturedLength(), char_format)
+
+
+class PythonCodeEditor(QPlainTextEdit):
+    """Editor Python con tabulación e indentación automática básica."""
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Tab and not event.modifiers():
+            self.textCursor().insertText("    ")
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            cursor = self.textCursor()
+            line = cursor.block().text()
+            indentation = line[:len(line) - len(line.lstrip())]
+            if line.rstrip().endswith(":"):
+                indentation += "    "
+            cursor.insertText("\n" + indentation)
+            return
+        super().keyPressEvent(event)
+
 
 class MainWindow(QMainWindow):
     """Ventana principal que coordina la interfaz y el estado del proyecto."""
 
     def __init__(self):
         super().__init__(); self.state=new_project(); self.path=None; self.playing=False
+        self._manim_render_frames=[]; self._manim_render_directory=None
+        self._manim_video_path=None; self._manim_render_worker=None
+        self._manim_frame_index=None; self._installing_manim_render=False
+        self._render_generation=0
         self.setWindowTitle('Manim Editor'); self.resize(1360,850)
         self._undo_stack=[]; self._redo_stack=[]; self._last_snapshot=json.dumps(self.state,sort_keys=True)
         # Barra superior: proyecto, pestañas, formato, historial y archivos.
@@ -75,23 +138,36 @@ class MainWindow(QMainWindow):
         zoom_row=QHBoxLayout(); add_track=QPushButton('+ Pista'); add_track.clicked.connect(self.add_track); zoom_row.addWidget(add_track); remove_track=QPushButton('− Pista'); remove_track.clicked.connect(self.remove_track); zoom_row.addWidget(remove_track); zoom_row.addWidget(QLabel('Zoom'))
         for label,factor in [('−',1.25),('+',0.8)]:
             button=QPushButton(label); button.clicked.connect(lambda _=False,f=factor:self.timeline.zoom(f)); zoom_row.addWidget(button)
-        zoom_row.addStretch()
-        transport=QHBoxLayout(); transport.addWidget(self.trim_button)
+        zoom_row.addStretch(); zoom_row.addWidget(self.trim_button)
         self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset)
 
         video_page=QWidget(); video_layout=QVBoxLayout(video_page); video_layout.setContentsMargins(0,0,0,0)
-        video_layout.addWidget(self.vertical_split,1); video_layout.addLayout(zoom_row); video_layout.addLayout(transport); video_layout.addWidget(self.timeline_scroll)
+        video_layout.addWidget(self.vertical_split,1); video_layout.addLayout(zoom_row); video_layout.addWidget(self.timeline_scroll)
         code_page=QWidget(); code_layout=QVBoxLayout(code_page); code_layout.setContentsMargins(8,8,8,8)
         self._code_view_dirty=False; self._updating_code_view=False
-        self.code_view=QPlainTextEdit(); self.code_view.setReadOnly(False); self.code_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.code_view=PythonCodeEditor(); self.code_view.setReadOnly(False); self.code_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._code_highlighter=PythonHighlighter(self.code_view.document())
+        code_font=QFont("monospace", 10); code_font.setStyleHint(QFont.StyleHint.Monospace)
+        self.code_view.setFont(code_font)
         self.code_view.textChanged.connect(self._mark_code_view_edited)
-        self.code_view.setPlaceholderText('El código de Manim de esta escena aparecerá aquí.')
+        self.code_view.setPlaceholderText('Escribe una escena Python completa usando Manim.')
         self.code_view.setStyleSheet('QPlainTextEdit{background:#15171b;color:#d8dee9;border:1px solid #363a40;border-radius:6px;padding:10px;font-family:monospace;font-size:13px;selection-background-color:#365f8c}')
-        self.code_status=QLabel('Edita el código para actualizar la previsualización.')
-        code_layout.addWidget(self.code_status)
+        code_toolbar=QHBoxLayout()
+        self.render_code_button=QPushButton('▶ Ejecutar escena')
+        self.render_code_button.setToolTip('Ejecutar el código con Manim y actualizar la previsualización')
+        self.render_code_button.clicked.connect(self.render_code_scene)
+        self.show_manim_error_button=QPushButton('Ver error')
+        self.show_manim_error_button.setVisible(False)
+        self.show_manim_error_button.clicked.connect(self._show_last_manim_error)
+        self.code_status=QLabel('El código y la previsualización se actualizan al terminar de editar.')
+        self.code_status.setWordWrap(True)
+        code_toolbar.addWidget(self.render_code_button)
+        code_toolbar.addWidget(self.show_manim_error_button)
+        code_toolbar.addWidget(self.code_status,1)
+        code_layout.addLayout(code_toolbar)
         code_layout.addWidget(self.code_view)
-        self._code_sync_timer=QTimer(self); self._code_sync_timer.setSingleShot(True); self._code_sync_timer.setInterval(350); self._code_sync_timer.timeout.connect(self.apply_code_to_preview)
-        self._applying_code=False
+        self._code_render_timer=QTimer(self); self._code_render_timer.setSingleShot(True); self._code_render_timer.setInterval(1000); self._code_render_timer.timeout.connect(self._render_edited_code)
+        self._auto_render_pending=False; self._auto_rendering=False; self._last_manim_error=''
         self._preview_sync_timer=QTimer(self); self._preview_sync_timer.setSingleShot(True); self._preview_sync_timer.setInterval(100); self._preview_sync_timer.timeout.connect(self._sync_preview_changes)
         self.workspace_pages=QStackedWidget(); self.workspace_pages.addWidget(video_page); self.workspace_pages.addWidget(code_page)
         self.workspace_tab_bar.currentChanged.connect(self.workspace_pages.setCurrentIndex)
@@ -152,6 +228,20 @@ class MainWindow(QMainWindow):
 
     # Convierte el estado del proyecto en una escena editable de Manim.
     def refresh_code_view(self, _index=None):
+        saved_source = self.state.get('manim_source')
+        if isinstance(saved_source, str) and saved_source.strip():
+            self._updating_code_view=True
+            self.code_view.setPlainText(saved_source)
+            self._updating_code_view=False
+            self._code_view_dirty=not bool(self._manim_video_path)
+            self.preview.set_editing_enabled(not self._code_view_dirty)
+            if self._code_view_dirty:
+                self.code_status.setText('Código cargado. Ejecútalo para reconstruir la previsualización.')
+                self.code_status.setStyleSheet('color:#d8c27a')
+            else:
+                self.code_status.setText('Código de Manim cargado desde el proyecto.')
+                self.code_status.setStyleSheet('color:#aeb4bd')
+            return
         lines = [
             'from manim import *',
             'import numpy as np',
@@ -173,6 +263,8 @@ class MainWindow(QMainWindow):
 
         for index, obj in enumerate(self.state.get('objects', [])):
             kind = obj.get('kind', '')
+            if kind == 'manim_scene':
+                continue
             if kind == 'text':
                 text_index += 1
             if not obj.get('visible', True):
@@ -274,22 +366,320 @@ class MainWindow(QMainWindow):
         self.code_view.setPlainText('\n'.join(lines) + '\n')
         self._updating_code_view=False
         self._code_view_dirty=False
+        self.preview.set_editing_enabled(True)
         self.code_status.setText('Código sincronizado con la previsualización.')
         self.code_status.setStyleSheet('color:#aeb4bd')
 
-    # Sincroniza las ediciones con una pausa corta para no parsear cada tecla.
+    # Renderiza automáticamente cuando termina una pausa en la escritura.
     def _mark_code_view_edited(self):
         if not self._updating_code_view:
+            self._pending_preview_seek=None
             self._code_view_dirty=True
-            self.code_status.setText('Aplicando cambios a la previsualización…')
+            self.preview.set_editing_enabled(False)
+            self._render_generation+=1
+            self._auto_render_pending=True
+            self._code_render_timer.start()
+            self.code_status.setText('Renderizando al terminar de escribir…')
             self.code_status.setStyleSheet('color:#d8c27a')
-            self._code_sync_timer.start()
+
+    def _render_edited_code(self):
+        self.render_code_scene(automatic=True)
+
+    def _show_last_manim_error(self):
+        if self._last_manim_error:
+            self._show_manim_error(self._last_manim_error)
 
     def preview_state_changed(self):
         self._preview_sync_timer.start()
 
     def _sync_preview_changes(self):
+        source=self.state.get('manim_source')
+        # La fuente también debe actualizarse cuando el MP4 temporal no está disponible.
+        if source and not self._code_view_dirty:
+            updated_source=self._sync_manim_source_from_preview(source,self.state.get('objects',[]))
+            if updated_source and updated_source!=source:
+                self._pending_preview_seek=float(self.timeline.position)
+                self.state['manim_source']=updated_source
+                self._updating_code_view=True
+                self.code_view.setPlainText(updated_source)
+                self._updating_code_view=False
+                self._code_view_dirty=True
+                self._render_generation+=1
+                self._auto_render_pending=True
+                self._code_render_timer.start(700)
+                self.code_status.setText('Cambios de la previsualización aplicados al código; preparando el render…')
+                self.code_status.setStyleSheet('color:#d8c27a')
         self.update_views()
+
+    def _sync_manim_source_from_preview(self, source, preview_objects):
+        """Actualiza solo las asignaciones de Mobject reconocidas en construct()."""
+        try:
+            tree=ast.parse(source)
+            baseline,_duration=self._parse_manim_scene(source)
+        except (SyntaxError,TypeError,ValueError):
+            return source
+        baseline_by_variable={
+            obj.get('manim_variable'):obj for obj in baseline if obj.get('manim_variable')
+        }
+        construct=next(
+            (node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='construct'),
+            None,
+        )
+        if construct is None:
+            return source
+        assignments={}
+        for statement in construct.body:
+            if isinstance(statement,ast.Assign):
+                targets=statement.targets
+            elif isinstance(statement,ast.AnnAssign):
+                targets=[statement.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target,ast.Name):
+                    assignments[target.id]=statement.value
+
+        source_bytes=source.encode('utf-8')
+        line_offsets=[]
+        offset=0
+        for line in source.splitlines(keepends=True):
+            line_offsets.append(offset)
+            offset+=len(line.encode('utf-8'))
+        replacements=[]
+        for obj in preview_objects:
+            variable=obj.get('manim_variable')
+            original=baseline_by_variable.get(variable)
+            value_node=assignments.get(variable)
+            if original is None or value_node is None:
+                continue
+            position_changed=any(
+                abs(float(obj.get('position',{}).get(axis,0.5))-float(original.get('position',{}).get(axis,0.5)))>0.0005
+                for axis in ('x','y')
+            )
+            is_text=obj.get('kind')=='text'
+            scale_changed=(
+                int(obj.get('font_size',42))!=int(original.get('font_size',42))
+                if is_text else
+                abs(float(obj.get('scale',1.0))-float(original.get('scale',1.0)))>0.001
+            )
+            rotation_changed=abs(float(obj.get('rotation',0.0))-float(original.get('rotation',0.0)))>0.1
+            color_changed=str(obj.get('color','#65d6ff')).lower()!=str(original.get('color','#65d6ff')).lower()
+            if not (position_changed or scale_changed or rotation_changed or color_changed):
+                continue
+
+            base_node=value_node
+            while (
+                isinstance(base_node,ast.Call)
+                and isinstance(base_node.func,ast.Attribute)
+                and base_node.func.attr in {'move_to','scale','rotate','set_color'}
+            ):
+                base_node=base_node.func.value
+            base_expression=ast.get_source_segment(source,base_node)
+            if not base_expression:
+                continue
+
+            transform_expressions=original.get('manim_transform_expressions',[])
+            expression=base_expression
+            for method in ('move_to','scale','rotate','set_color'):
+                if method=='move_to' and position_changed:
+                    frame_width=14.222
+                    width=max(1,int(self.state.get('width',1920)))
+                    height=max(1,int(self.state.get('height',1080)))
+                    frame_height=frame_width*height/width
+                    position=obj.get('position',{'x':0.5,'y':0.5})
+                    x=float(position.get('x',0.5))
+                    y=float(position.get('y',0.5))
+                    if is_text:
+                        font=QFont(obj.get('font_family','Noto Serif'),int(obj.get('font_size',42)))
+                        metrics=QFontMetricsF(font)
+                        x+=metrics.horizontalAdvance(str(obj.get('expression','')))/2000
+                        y+=metrics.height()/(2*1000*height/width)
+                    scene_x=(x-0.5)*frame_width
+                    scene_y=(0.5-y)*frame_height
+                    expression+=f'.move_to([{scene_x:.6f}, {scene_y:.6f}, 0])'
+                elif method=='scale' and scale_changed:
+                    if is_text:
+                        base_keywords={item.arg:item.value for item in base_node.keywords if item.arg}
+                        base_size=int(self._code_literal(base_keywords.get('font_size'),42))
+                        scale=float(obj.get('font_size',base_size))/max(1,base_size)
+                    else:
+                        scale=float(obj.get('scale',1.0))
+                    if abs(scale-1.0)>0.001:
+                        expression+=f'.scale({scale:.6f})'
+                elif method=='rotate' and rotation_changed:
+                    rotation=float(obj.get('rotation',0.0))
+                    if abs(rotation)>0.1:
+                        expression+=f'.rotate({rotation:.6f} * DEGREES)'
+                elif method=='set_color' and color_changed:
+                    expression+=f'.set_color({json.dumps(str(obj.get("color","#65d6ff")))})'
+                else:
+                    expression+=''.join(
+                        f'.{existing_method}({argument})'
+                        for existing_method,argument in transform_expressions
+                        if existing_method==method
+                    )
+
+            start=line_offsets[value_node.lineno-1]+value_node.col_offset
+            end=line_offsets[value_node.end_lineno-1]+value_node.end_col_offset
+            replacements.append((start,end,expression.encode('utf-8')))
+
+        for start,end,replacement in sorted(replacements,reverse=True):
+            source_bytes=source_bytes[:start]+replacement+source_bytes[end:]
+        updated_source=source_bytes.decode('utf-8')
+        for obj in preview_objects:
+            if obj.get('manim_variable') or obj.get('kind')=='manim_scene':
+                continue
+            variable=self._next_preview_variable(updated_source)
+            expression=self._preview_object_expression(obj)
+            if not expression:
+                continue
+            source_before_insert=updated_source
+            updated_source,actual_start=self._insert_preview_object(
+                updated_source,variable,expression,float(obj.get('start',0.0)),float(obj.get('duration',1.0)),
+            )
+            if (
+                updated_source != source_before_insert
+                and re.search(rf'\b{re.escape(variable)}\s*=',updated_source)
+            ):
+                obj['manim_variable']=variable
+                obj['start']=actual_start
+                self._pending_preview_seek=actual_start
+        return updated_source
+
+    @staticmethod
+    def _next_preview_variable(source):
+        names=set(re.findall(r'\bpreview_obj_(\d+)\b',source))
+        index=1
+        while str(index) in names:
+            index+=1
+        return f'preview_obj_{index}'
+
+    def _preview_object_expression(self,obj):
+        """Forma una expresión Manim para un objeto creado desde la previsualización."""
+        kind=obj.get('kind')
+        color=json.dumps(str(obj.get('color','#65d6ff')))
+        expression=str(obj.get('expression',''))
+        if kind=='text':
+            weight='BOLD' if int(obj.get('font_weight',400))>=700 else 'NORMAL'
+            base=(
+                f'Text({json.dumps(expression,ensure_ascii=False)}, '
+                f'font={json.dumps(str(obj.get("font_family","Noto Serif")))}, '
+                f'font_size={int(obj.get("font_size",42))}, weight={json.dumps(weight)}, color={color})'
+            )
+        elif kind=='axes':
+            base=f'Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], tips=False).set_color({color})'
+        elif kind=='point':
+            base=f'Dot(color={color})'
+        elif kind=='line':
+            base=f'Line(LEFT, RIGHT, color={color})'
+        elif kind=='vector':
+            base=f'Arrow(ORIGIN, RIGHT, color={color})'
+        elif kind=='arrow':
+            base=f'Arrow(LEFT, RIGHT, color={color})'
+        elif kind=='circle':
+            base=f'Circle(color={color})'
+        elif kind=='ellipse':
+            base=f'Ellipse(width=2, height=1, color={color})'
+        elif kind=='polygon':
+            base=f'Polygon(LEFT, UP, RIGHT, color={color})'
+        elif kind=='table':
+            base=f'Table([[{json.dumps(expression,ensure_ascii=False)}]], include_outer_lines=True).set_color({color})'
+        else:
+            return None
+
+        position=obj.get('position',{'x':0.5,'y':0.5})
+        x=float(position.get('x',0.5))
+        y=float(position.get('y',0.5))
+        width=max(1,int(self.state.get('width',1920)))
+        height=max(1,int(self.state.get('height',1080)))
+        frame_width=14.222
+        frame_height=frame_width*height/width
+        if kind=='text':
+            font=QFont(obj.get('font_family','Noto Serif'),int(obj.get('font_size',42)))
+            metrics=QFontMetricsF(font)
+            x+=metrics.horizontalAdvance(expression)/2000
+            y+=metrics.height()/(2*1000*height/width)
+        scene_x=(x-0.5)*frame_width
+        scene_y=(0.5-y)*frame_height
+        result=f'{base}.move_to([{scene_x:.6f}, {scene_y:.6f}, 0])'
+        if kind!='text' and abs(float(obj.get('scale',1.0))-1.0)>0.001:
+            result+=f'.scale({float(obj["scale"]):.6f})'
+        rotation=float(obj.get('rotation',0.0))
+        if abs(rotation)>0.1:
+            result+=f'.rotate({rotation:.6f} * DEGREES)'
+        return result
+
+    def _insert_preview_object(self,source,variable,expression,start,duration):
+        """Inserta el objeto en construct() cerca del instante elegido en la línea de tiempo."""
+        try:
+            tree=ast.parse(source)
+        except SyntaxError:
+            return source,start
+        construct=next(
+            (node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='construct'),
+            None,
+        )
+        if construct is None:
+            return source,start
+        indent=' '*(construct.col_offset+4)
+        block=[f'{indent}{variable} = {expression}',f'{indent}self.add({variable})']
+        target=max(0.0,start)
+        current=0.0
+        insertion_index=construct.end_lineno
+        actual_start=current
+        timed_actions={'wait','play'}
+        for statement in construct.body:
+            if isinstance(statement,ast.Return):
+                insertion_index=statement.lineno-1
+                actual_start=current
+                break
+            if not isinstance(statement,ast.Expr) or not isinstance(statement.value,ast.Call):
+                continue
+            call=statement.value
+            if not isinstance(call.func,ast.Attribute) or not isinstance(call.func.value,ast.Name) or call.func.value.id!='self':
+                continue
+            action=call.func.attr
+            if action in {'add','remove'} and target<=current+0.0001:
+                insertion_index=statement.lineno-1
+                actual_start=current
+                break
+            if action not in timed_actions:
+                continue
+            elapsed=(
+                max(0.0,float(self._code_literal(call.args[0],1.0)))
+                if action=='wait' and call.args else
+                max(0.0,float(next((self._code_literal(item.value,1.0) for item in call.keywords if item.arg=='run_time'),1.0)))
+                if action=='play' else 1.0
+            )
+            if target<=current+0.0001:
+                insertion_index=statement.lineno-1
+                actual_start=current
+                break
+            if target<current+elapsed:
+                # Insertar al cerrar una animación evita dividir su secuencia.
+                insertion_index=statement.end_lineno
+                actual_start=current+elapsed
+                break
+            current+=elapsed
+            actual_start=current
+
+        lines=source.splitlines(keepends=True)
+        future_timing=False
+        for statement in construct.body:
+            if statement.lineno-1<insertion_index:
+                continue
+            if isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Call):
+                call=statement.value
+                if isinstance(call.func,ast.Attribute) and isinstance(call.func.value,ast.Name) and call.func.value.id=='self' and call.func.attr in timed_actions:
+                    future_timing=True
+                    break
+        if not future_timing:
+            block.append(f'{indent}self.wait({max(0.1,min(1.0,duration)):.3f})')
+        block_text='\n'.join(block)+'\n'
+        if insertion_index>0 and insertion_index<=len(lines) and not lines[insertion_index-1].endswith(('\n','\r')):
+            lines[insertion_index-1]+='\n'
+        lines.insert(insertion_index,block_text)
+        return ''.join(lines),actual_start
 
     # Lectura segura de las construcciones de Manim que soporta el editor.
     @staticmethod
@@ -324,15 +714,24 @@ class MainWindow(QMainWindow):
             return None
         keywords={item.arg:item.value for item in node.keywords if item.arg}
         args=node.args
-        color=self._code_literal(keywords.get('color'), '#65d6ff')
+        color_names={
+            'WHITE':'#FFFFFF','BLACK':'#000000','RED':'#FC6255','MAROON':'#C55AAB',
+            'YELLOW':'#FFFF00','GOLD':'#F0AC5F','GREEN':'#83C167','TEAL':'#5CD0B3',
+            'BLUE':'#58C4DD','PURPLE':'#9A72AC','PINK':'#D147BD','ORANGE':'#FF862F',
+            'GREY':'#888888','GRAY':'#888888',
+        }
+        color_node=keywords.get('color')
+        color=self._code_literal(color_node, color_names.get(getattr(color_node,'id',''), '#65d6ff'))
         expression=''
         kind=None
         obj={'name':variable.replace('_',' ').title(),'kind':'','expression':'','color':color,
-             'start':0,'duration':1,'visible':True,'track':'Pista 1','position':{'x':0.52,'y':0.54},'scale':1.0}
+             'start':0,'duration':1,'visible':True,'track':'Pista 1','position':{'x':0.52,'y':0.54},'scale':1.0,
+             'manim_variable':variable}
 
         if call_name in {'Text','MathTex','Tex'}:
             kind='text'
             expression=self._code_literal(args[0], '') if args else ''
+            obj['position']={'x':0.5,'y':0.5}
             obj.update(
                 name=str(expression)[:24] or obj['name'],
                 font_family=self._code_literal(keywords.get('font'), 'Noto Serif'),
@@ -387,7 +786,8 @@ class MainWindow(QMainWindow):
             method=transform.func.attr
             value=transform.args[0] if transform.args else None
             if method=='set_color':
-                obj['color']=self._code_literal(value, obj['color'])
+                color_node=value
+                obj['color']=self._code_literal(value, color_names.get(getattr(value,'id',''),obj['color']))
             elif method=='scale':
                 obj['scale']=float(self._code_literal(value, 1.0))
             elif method=='rotate':
@@ -413,8 +813,30 @@ class MainWindow(QMainWindow):
                 frame_width=14.222
                 frame_height=frame_width*max(1,int(self.state.get('height',1080)))/max(1,int(self.state.get('width',1920)))
                 obj['position']={'x':max(0,min(1,x/frame_width+0.5)), 'y':max(0,min(1,0.5-y/frame_height))}
-        if kind=='text' and call_name in {'Text','MathTex','Tex'} and not transforms:
-            obj['position']={'x':0.04,'y':0.1}
+        obj['manim_transform_expressions']=[
+            (transform.func.attr,ast.unparse(transform.args[0]))
+            for transform in reversed(transforms)
+            if transform.args
+        ]
+        if color_node is not None:
+            obj['manim_color_expression']=ast.unparse(color_node)
+        if kind=='text' and call_name in {'Text','MathTex','Tex'}:
+            base_font_size=int(self._code_literal(keywords.get('font_size'),42))
+            obj['font_size']=max(8,round(base_font_size*obj.get('scale',1.0)))
+            obj['scale']=1.0
+            font=QFont(
+                obj.get('font_family','Noto Serif'),
+                obj['font_size'],
+                QFont.Weight(obj.get('font_weight',400)),
+            )
+            metrics=QFontMetricsF(font)
+            center=obj['position']
+            frame_width=1000.0
+            frame_height=frame_width*max(1,int(self.state.get('height',1080)))/max(1,int(self.state.get('width',1920)))
+            obj['position']={
+                'x':center['x']-metrics.horizontalAdvance(obj['expression'])/(2*frame_width),
+                'y':center['y']-metrics.height()/(2*frame_height),
+            }
         return obj
 
     # Convierte asignaciones y animaciones reconocidas en objetos del timeline.
@@ -430,13 +852,34 @@ class MainWindow(QMainWindow):
         objects={}
         current_objects=self.state.get('objects',[])
         tracks_by_variable={
+            obj.get('manim_variable'):obj.get('track','Pista 1')
+            for obj in current_objects if obj.get('manim_variable')
+        }
+        tracks_by_variable.update({
             f'obj_{index + 1}':obj.get('track','Pista 1')
             for index,obj in enumerate(current_objects)
-        }
+        })
         tracks_by_name={
             obj.get('name'):obj.get('track','Pista 1')
             for obj in current_objects if obj.get('name')
         }
+        tracks=self.state.setdefault('tracks',['Pista 1'])
+        used_tracks={obj.get('track') for obj in current_objects if obj.get('track')}
+
+        def track_for(variable, obj):
+            previous=tracks_by_variable.get(variable,tracks_by_name.get(obj.get('name')))
+            if previous:
+                used_tracks.add(previous)
+                return previous
+            available=next((track for track in reversed(tracks) if track not in used_tracks),None)
+            if available is None:
+                number=1
+                while f'Pista {number}' in tracks:
+                    number+=1
+                available=f'Pista {number}'
+                tracks.append(available)
+            used_tracks.add(available)
+            return available
         for statement in construct.body:
             if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 continue
@@ -446,10 +889,7 @@ class MainWindow(QMainWindow):
                 continue
             parsed=self._read_manim_object(value,target.id)
             if parsed is not None:
-                parsed['track']=tracks_by_variable.get(
-                    target.id,
-                    tracks_by_name.get(parsed.get('name'), self.state.get('tracks',['Pista 1'])[-1]),
-                )
+                parsed['track']=track_for(target.id,parsed)
                 objects[target.id]=parsed
 
         starts={}
@@ -508,41 +948,193 @@ class MainWindow(QMainWindow):
             timeline.append(obj)
         return timeline,total_duration
 
-    def apply_code_to_preview(self):
-        try:
-            objects,duration=self._parse_manim_scene(self.code_view.toPlainText())
-        except (SyntaxError, ValueError, TypeError, OverflowError) as error:
-            detail=f'Error en el código; se conserva la última previsualización válida: {error}'
-            self.code_status.setText(detail)
+    def render_code_scene(self, automatic=False):
+        if not automatic:
+            self._code_render_timer.stop()
+        if self._manim_render_worker is not None and self._manim_render_worker.isRunning():
+            self._auto_render_pending=True
+            return
+        source=self.code_view.toPlainText()
+        if not source.strip():
+            self.code_status.setText('Escribe una escena Python antes de ejecutarla.')
             self.code_status.setStyleSheet('color:#ff8585')
             return
 
-        self._applying_code=True
+        width=max(1,int(self.state.get('width',1920)))
+        height=max(1,int(self.state.get('height',1080)))
+        factor=min(640/width,640/height)
+        render_width=max(240,round(width*factor))
+        render_height=max(240,round(height*factor))
+        project_root=Path(__file__).resolve().parents[3]
+        worker=ManimRenderWorker(source,render_width,render_height,project_root,self)
+        worker.render_done.connect(self._on_manim_render_done)
+        worker.finished.connect(self._release_manim_render_worker)
+        self._active_render_source=source
+        self._render_generation=getattr(self,'_render_generation',0)
+        self._active_render_generation=self._render_generation
+        self._auto_render_pending=False
+        self._auto_rendering=automatic
+        self._manim_render_worker=worker
+        self.render_code_button.setEnabled(False)
+        self.code_status.setText('Renderizando automáticamente…' if automatic else 'Renderizando la escena con Manim…')
+        self.code_status.setStyleSheet('color:#d8c27a')
+        worker.start()
+
+    def _on_manim_render_done(self, succeeded, render_directory, frames, video_path, scene_name, error):
+        self.render_code_button.setEnabled(True)
+        if getattr(self,'_active_render_generation',-1) != getattr(self,'_render_generation',0):
+            if succeeded and render_directory:
+                shutil.rmtree(render_directory,ignore_errors=True)
+            return
+        if not succeeded:
+            self._last_manim_error=error
+            self.show_manim_error_button.setVisible(True)
+            self.code_status.setText(
+                'Falló el render automático; se conserva la última previsualización. Usa «Ver error» para ver el detalle.'
+                if self._auto_rendering else
+                'Manim no pudo renderizar el código; se conserva la última previsualización.'
+            )
+            self.code_status.setStyleSheet('color:#ff8585')
+            if not self._auto_rendering:
+                self._show_manim_error(error)
+            return
+
+        if self._manim_render_directory:
+            shutil.rmtree(self._manim_render_directory,ignore_errors=True)
+        self._manim_render_directory=render_directory
+        self._manim_render_frames=list(frames)
+        self._manim_video_path=video_path
+        self._manim_frame_index=None
+        duration=max(0.1,len(self._manim_render_frames)/30)
+        tracks=self.state.setdefault('tracks',['Pista 1'])
+        track=tracks[0] if tracks else 'Pista 1'
+        if not tracks:
+            tracks.append(track)
         try:
-            self.state['objects']=objects
-            self.state['duration']=max(1.0,duration)
-            self.code_status.setText('Código aplicado a la previsualización.')
-            self.code_status.setStyleSheet('color:#9bd6a4')
-            self.refresh_objects()
-            self.preview.update()
-            self.timeline.update()
+            parsed_objects,_parsed_duration=self._parse_manim_scene(self._active_render_source)
+        except (SyntaxError,TypeError,ValueError):
+            parsed_objects=[]
+        editable_objects={}
+        for obj in parsed_objects:
+            variable=obj.get('manim_variable')
+            if not variable:
+                continue
+            if variable not in editable_objects:
+                editable_objects[variable]=dict(obj)
+            else:
+                existing=editable_objects[variable]
+                end=max(existing['start']+existing['duration'],obj['start']+obj['duration'])
+                existing['start']=min(existing['start'],obj['start'])
+                existing['duration']=max(0.1,end-existing['start'])
+        editable_objects=list(editable_objects.values())
+        if editable_objects:
+            for obj in editable_objects:
+                obj['start']=max(0.0,min(duration,obj.get('start',0.0)))
+                obj['duration']=max(0.1,min(obj.get('duration',duration),duration-obj['start']))
+            rendered_objects=editable_objects
+        else:
+            rendered_objects=[{
+                'name':f'Escena Manim · {scene_name}','kind':'manim_scene',
+                'expression':'','color':'#65d6ff','start':0.0,'duration':duration,
+                'visible':True,'track':track,
+            }]
+        old_snapshot=self._last_snapshot
+        self._undo_stack.append(old_snapshot)
+        self._undo_stack=self._undo_stack[-100:]
+        self._redo_stack.clear()
+        self.state['objects']=rendered_objects
+        self.state['duration']=duration
+        self.state['manim_source']=self._active_render_source
+        self._last_snapshot=json.dumps(self.state,sort_keys=True)
+        self._installing_manim_render=True
+        try:
+            self.preview.state=self.state
+            self.timeline.state=self.state
+            self.preview.progress=0
+            self.timeline.position=0
             self._code_view_dirty=False
+            self.preview.set_editing_enabled(True)
+            self.refresh_objects(0)
+            self.refresh_code_view()
+            preview_seek=getattr(self,'_pending_preview_seek',None)
+            self._pending_preview_seek=None
+            self.seek(max(0.0,min(duration,preview_seek)) if preview_seek is not None else 0.0)
+            self.timeline.update()
+            self.code_status.setText(f'Render listo · {scene_name} · {duration:.1f} s')
+            self.code_status.setStyleSheet('color:#9bd6a4')
+            self._last_manim_error=''
+            self.show_manim_error_button.setVisible(False)
         finally:
-            self._applying_code=False
+            self._installing_manim_render=False
+
+    def _show_manim_error(self, error):
+        """Muestra el traceback completo en un cuadro que permite desplazarse y copiar."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Error al ejecutar Manim')
+        dialog.resize(900, 600)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            'Manim no pudo renderizar la escena. Puedes desplazarte por el error o copiarlo completo.'
+        ))
+
+        error_text = QPlainTextEdit(dialog)
+        error_text.setReadOnly(True)
+        error_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        error_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        error_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        error_text.setStyleSheet(
+            'QPlainTextEdit{background:#15171b;color:#d8dee9;border:1px solid #363a40;'
+            'border-radius:6px;padding:8px;font-family:monospace;font-size:12px;'
+            'selection-background-color:#365f8c}'
+        )
+        error_text.setPlainText(str(error) or 'Manim terminó con un error sin incluir detalles.')
+        error_text.setMinimumSize(680, 380)
+        layout.addWidget(error_text, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        copy_button = QPushButton('Copiar error', dialog)
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(error_text.toPlainText()))
+        buttons.addWidget(copy_button)
+        close_button = QPushButton('Cerrar', dialog)
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        dialog.exec()
+
+    def _release_manim_render_worker(self):
+        worker=self._manim_render_worker
+        self._manim_render_worker=None
+        if worker is not None:
+            worker.deleteLater()
+        if self._auto_render_pending and not self._code_render_timer.isActive():
+            self._code_render_timer.start(0)
 
     # Mantiene las vistas, el código y el historial alineados con el estado.
     def update_views(self):
         self.state['duration']=max([self.state['duration']]+[o['start']+o['duration'] for o in self.state['objects']])
         snapshot=json.dumps(self.state,sort_keys=True)
         if snapshot != self._last_snapshot:
+            # Conserva el código personalizado aunque todavía no haya un render en caché.
             self._undo_stack.append(self._last_snapshot); self._undo_stack=self._undo_stack[-100:]; self._redo_stack.clear(); self._last_snapshot=snapshot
-            if not self._applying_code and not self._code_view_dirty:
+            if not self._installing_manim_render and not self._code_view_dirty:
                 self.refresh_code_view()
         self.preview.update(); self.timeline.update(); self._update_timeline_scroll()
+
+    def _clear_manim_render(self):
+        self.preview.set_rendered_frame(None)
+        self._manim_render_frames=[]
+        self._manim_frame_index=None
+        self._manim_video_path=None
+        if self._manim_render_directory:
+            shutil.rmtree(self._manim_render_directory,ignore_errors=True)
+            self._manim_render_directory=None
+
     # Historial de deshacer/rehacer basado en instantáneas del proyecto.
     def _restore_history(self, source, destination):
         if not source:return
         destination.append(json.dumps(self.state)); self.state=json.loads(source.pop()); self._last_snapshot=json.dumps(self.state,sort_keys=True)
+        self._render_generation+=1; self._clear_manim_render(); self._code_view_dirty=False
         self.preview.state=self.state; self.timeline.state=self.state; self.refresh_objects()
         if not self._code_view_dirty:
             self.refresh_code_view()
@@ -570,21 +1162,37 @@ class MainWindow(QMainWindow):
         seconds=v if isinstance(v,float) else self.state['duration']*v/100
         seconds=max(0,min(self.state['duration'],seconds)); self.slider.blockSignals(True); self.slider.setValue(round(seconds/max(1,self.state['duration'])*100)); self.slider.blockSignals(False)
         self.preview.progress=seconds/max(1,self.state['duration']); self.timeline.position=seconds; self.update_views()
+        if self._manim_render_frames:
+            frame_index=min(len(self._manim_render_frames)-1,round(self.preview.progress*(len(self._manim_render_frames)-1)))
+            if frame_index != self._manim_frame_index:
+                self.preview.set_rendered_frame(QPixmap(self._manim_render_frames[frame_index]))
+                self._manim_frame_index=frame_index
         frame=round(seconds*30); total=round(self.state['duration']*30)
         def tc(n):
             s,f=divmod(n,30); h,s=divmod(s,3600); m,s=divmod(s,60); return f'{h:02d}:{m:02d}:{s:02d}:{f:02d}'
         self.timecode.setText(f'{tc(frame)} / {tc(total)}')
     def toggle_play(self):
         self.playing=not self.playing; self.play_btn.setText('❚❚' if self.playing else '▶'); self.play_btn.setToolTip('Pausar' if self.playing else 'Reproducir'); self.timer.start() if self.playing else self.timer.stop()
-    def tick(self): self.seek((self.slider.value()+1)%101)
-    def new_project(self): self.state=new_project(); self.path=None; self.preview.state=self.state; self.timeline.state=self.state; self.timeline.set_scroll_offset(0); self._update_timeline_scroll(); self.refresh_objects()
+    def tick(self):
+        duration=max(0.1,float(self.state.get('duration',10)))
+        seconds=float(self.timeline.position) + self.timer.interval()/1000
+        if seconds>=duration:
+            self.timer.stop(); self.playing=False; self.play_btn.setText('▶'); self.play_btn.setToolTip('Reproducir')
+            self.seek(duration)
+        else:
+            self.seek(seconds)
+    def new_project(self):
+        self._render_generation+=1; self._clear_manim_render(); self._code_view_dirty=False
+        self.state=new_project(); self.path=None; self.preview.state=self.state; self.timeline.state=self.state; self.timeline.set_scroll_offset(0); self._update_timeline_scroll(); self.refresh_objects(); self.refresh_code_view()
     # Persistencia: carga y guardado del formato de proyecto.
     def open_project(self):
         path,_=QFileDialog.getOpenFileName(self,'Abrir proyecto','','Manim Editor (*.manimproj);;JSON (*.json)')
         if not path:return
         try:
             data=load_project(path)
-            self.state=data; self.path=Path(path); self.preview.state=self.state; self.timeline.state=self.state; self._update_timeline_scroll(); self.set_format_control(); self.refresh_objects()
+            self._render_generation+=1; self._clear_manim_render(); self._code_view_dirty=False
+            self.state=data; self._last_snapshot=json.dumps(self.state,sort_keys=True); self.path=Path(path); self.preview.state=self.state; self.timeline.state=self.state; self._update_timeline_scroll(); self.set_format_control(); self.refresh_objects()
+            self.refresh_code_view()
         except (OSError,ValueError,AssertionError,KeyError) as e: QMessageBox.critical(self,'No se pudo abrir',str(e))
     def save_project(self):
         if not self.path:
@@ -592,7 +1200,10 @@ class MainWindow(QMainWindow):
             if not path:return
             self.path=Path(path)
         try:
+            if self._code_view_dirty:
+                self.state['manim_source']=self.code_view.toPlainText()
             self.state['name']=self.path.stem; save_project(self.path,self.state); self.project_label.setText(self.path.name)
+            self._last_snapshot=json.dumps(self.state,sort_keys=True)
         except OSError as e: QMessageBox.critical(self,'No se pudo guardar',str(e))
 
     # Exportación: renderiza cada fotograma de la previsualización y lo envía a ffmpeg.
@@ -602,10 +1213,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self,'Exportar MP4','No se encontró ffmpeg. Instálalo y vuelve a intentarlo.')
             return
 
+        if self._code_view_dirty:
+            QMessageBox.information(self,'Código sin renderizar','Ejecuta la escena con Manim antes de exportar el código editado.')
+            return
         output_path,_=QFileDialog.getSaveFileName(self,'Exportar video MP4','video.mp4','Video MP4 (*.mp4)')
         if not output_path:return
         if not output_path.lower().endswith('.mp4'):
             output_path += '.mp4'
+
+        if self._manim_video_path and os.path.isfile(self._manim_video_path):
+            try:
+                shutil.copy2(self._manim_video_path,output_path)
+            except OSError as error:
+                QMessageBox.critical(self,'No se pudo exportar el video',str(error))
+            else:
+                QMessageBox.information(self,'Video exportado',f'El video se guardó en:\n{output_path}')
+            return
 
         width=max(1,int(self.state.get('width',1920)))
         height=max(1,int(self.state.get('height',1080)))
@@ -698,4 +1321,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self,'Exportación cancelada','Se canceló la exportación.')
         else:
             QMessageBox.information(self,'Video exportado',f'El video se guardó en:\n{output_path}')
+
+    def closeEvent(self,event):
+        self._render_generation+=1
+        worker=self._manim_render_worker
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            worker.wait()
+        self._clear_manim_render()
+        super().closeEvent(event)
 
