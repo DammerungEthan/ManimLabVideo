@@ -104,9 +104,6 @@ class Preview(QWidget):
         p.setClipRect(int(ox), int(oy), int(cw), int(ch))
         p.translate(ox, oy)
         p.scale(cw / w, ch / h)
-        p.setPen(QPen(QColor("#1d2532"), 1))
-        for x in range(24, w, 36): p.drawLine(x, 0, x, h)
-        for y in range(18, h, 36): p.drawLine(0, y, w, y)
         cx, cy, scale = w * .52, h * .54, min(w, h) * .30
         now = self.progress * self.state["duration"]
         active = {o["kind"]: o for o in self.state["objects"]
@@ -130,7 +127,5 @@ class Preview(QWidget):
             obj = active["text"]
             p.setPen(QColor(obj["color"])); p.setFont(QFont("Sans Serif", 16, QFont.Weight.DemiBold))
             p.drawText(24, 36, obj["expression"])
-        p.setPen(QColor("#8290a5")); p.setFont(QFont("Sans Serif", 9))
-        p.drawText(24, h-20, "VISTA PREVIA · PROTOTIPO")
         p.restore(); p.setPen(QPen(QColor("#536174"), 1)); p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(int(ox), int(oy), int(cw), int(ch))

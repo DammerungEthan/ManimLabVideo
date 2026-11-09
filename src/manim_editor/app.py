@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox,
+    QListWidget, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter,
     QVBoxLayout, QWidget, QLineEdit, QFormLayout, QCheckBox, QComboBox, QScrollBar,
 )
 
@@ -19,33 +19,40 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.state=new_project(); self.path=None; self.playing=False
         self.setWindowTitle('Manim Editor'); self.resize(1360,850)
+        self._undo_stack=[]; self._redo_stack=[]; self._last_snapshot=json.dumps(self.state,sort_keys=True)
         root=QWidget(); root.setObjectName('root'); outer=QVBoxLayout(root); outer.setContentsMargins(8,8,8,8)
         bar=QHBoxLayout(); title=QLabel('✦  MANIM EDITOR'); title.setStyleSheet('font-size:18px;font-weight:700'); bar.addWidget(title); self.project_label=QLabel(self.state['name']); bar.addWidget(self.project_label); bar.addStretch()
         bar.addWidget(QLabel('Formato')); self.format_box=QComboBox(); self.format_box.addItem('YouTube · 16:9',('youtube',1920,1080)); self.format_box.addItem('Reels / Shorts · 9:16',('vertical',1080,1920)); self.format_box.currentIndexChanged.connect(self.change_format); bar.addWidget(self.format_box)
-        for text,fn in [('Nuevo',self.new_project),('Abrir',self.open_project),('Guardar',self.save_project)]:
+        for text,fn in [('↶',self.undo),('↷',self.redo),('Nuevo',self.new_project),('Abrir',self.open_project),('Guardar',self.save_project)]:
             b=QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
         outer.addLayout(bar)
-        body=QHBoxLayout(); center=QVBoxLayout(); self.preview=Preview(self.state); center.addWidget(self.preview,1)
-        controls=QHBoxLayout(); self.play_btn=QPushButton('▶ Reproducir'); self.play_btn.clicked.connect(self.toggle_play); controls.addWidget(self.play_btn)
-        self.slider=QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0,100); self.slider.setValue(38); self.slider.valueChanged.connect(self.seek); controls.addWidget(self.slider,1); center.addLayout(controls)
-        self.timecode=QLabel('00:00:03:24 / 00:00:10:00'); self.timecode.setMinimumWidth(190); controls.addWidget(self.timecode)
+        body=QHBoxLayout(); center=QVBoxLayout(); self.preview=Preview(self.state)
+        self.play_btn=QPushButton('▶'); self.play_btn.setToolTip('Reproducir'); self.play_btn.setFixedWidth(32); self.play_btn.clicked.connect(self.toggle_play)
+        self.slider=QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0,100); self.slider.setValue(38); self.slider.valueChanged.connect(self.seek)
+        self.timecode=QLabel('00:00:03:24 / 00:00:10:00'); self.timecode.setMinimumWidth(190)
+        self.trim_button=QPushButton('✂ Trim'); self.trim_button.setToolTip('Dividir el clip seleccionado en el cabezal'); self.trim_button.clicked.connect(self.trim_clip)
         timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); timeline_row.addWidget(self.timeline,1)
         self.track_scroll=QScrollBar(Qt.Orientation.Vertical); self.track_scroll.valueChanged.connect(self.timeline.set_row_offset); self.track_scroll.setSingleStep(1); timeline_row.addWidget(self.track_scroll)
-        center.addLayout(timeline_row)
-        zoom_row=QHBoxLayout(); add_track=QPushButton('+ Pista'); add_track.clicked.connect(self.add_track); zoom_row.addWidget(add_track); zoom_row.addWidget(QLabel('Zoom timeline'))
+        self.timeline_area=QWidget(); self.timeline_area.setLayout(timeline_row)
+        self.vertical_split=QSplitter(Qt.Orientation.Vertical); self.vertical_split.setChildrenCollapsible(False); self.vertical_split.addWidget(self.preview); self.vertical_split.addWidget(self.timeline_area); self.vertical_split.setStretchFactor(0,1); self.vertical_split.setSizes([560,190]); center.addWidget(self.vertical_split,1)
+        zoom_row=QHBoxLayout(); add_track=QPushButton('+ Pista'); add_track.clicked.connect(self.add_track); zoom_row.addWidget(add_track); remove_track=QPushButton('− Pista'); remove_track.clicked.connect(self.remove_track); zoom_row.addWidget(remove_track); zoom_row.addWidget(QLabel('Zoom'))
         for label,factor in [('−',1.25),('+',0.8)]:
             button=QPushButton(label); button.clicked.connect(lambda _=False,f=factor:self.timeline.zoom(f)); zoom_row.addWidget(button)
         zoom_row.addStretch(); center.addLayout(zoom_row)
+        transport=QHBoxLayout(); transport.addWidget(self.play_btn); transport.addWidget(self.slider,1); transport.addWidget(self.timecode); transport.addWidget(self.trim_button); center.addLayout(transport)
         self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset); center.addWidget(self.timeline_scroll)
         self._update_timeline_scroll(); body.addLayout(center,1)
-        side=QVBoxLayout(); side.addWidget(QLabel('OBJETOS')); self.objects=QListWidget(); self.objects.currentRowChanged.connect(self.select_object); side.addWidget(self.objects)
-        object_actions=QHBoxLayout(); add_btn=QPushButton('+ Gráfica'); add_btn.clicked.connect(self.add_graph); object_actions.addWidget(add_btn); delete_btn=QPushButton('Eliminar'); delete_btn.clicked.connect(self.delete_object); object_actions.addWidget(delete_btn); side.addLayout(object_actions)
+        side=QVBoxLayout(); side.addWidget(QLabel('AÑADIR ELEMENTO'))
+        self.element_list=QListWidget(); self.element_list.addItems(['Gráficas: seno, coseno, tangente, x², exponencial, logaritmo','Texto y ecuación LaTeX','Punto','Vector','Recta','Círculo','Elipse','Polígono','Flecha','Ejes cartesianos','Plano cartesiano','Llaves y etiquetas','Imagen','Tabla','Grupo'])
+        side.addWidget(self.element_list); add_btn=QPushButton('+ Añadir elemento'); add_btn.clicked.connect(self.add_selected_element); side.addWidget(add_btn)
+        side.addWidget(QLabel('OBJETOS')); self.objects=QListWidget(); self.objects.currentRowChanged.connect(self.select_object); side.addWidget(self.objects)
+        object_actions=QHBoxLayout(); delete_btn=QPushButton('Eliminar objeto'); delete_btn.clicked.connect(self.delete_object); object_actions.addWidget(delete_btn); side.addLayout(object_actions)
         form=QFormLayout(); self.name=QLineEdit(); self.expr=QLineEdit(); self.start=QSpinBox(); self.start.setRange(0,999); self.length=QSpinBox(); self.length.setRange(1,999); self.color_btn=QPushButton('Elegir color'); self.color_btn.clicked.connect(self.choose_color)
         self.visible=QCheckBox('Visible en la escena'); self.visible.stateChanged.connect(self.visibility_changed)
         for label,w in [('Nombre',self.name),('Expresión / texto',self.expr),('Inicio (s)',self.start),('Duración (s)',self.length),('Color',self.color_btn),('',self.visible)]: form.addRow(label,w)
         side.addLayout(form); self.apply_btn=QPushButton('Aplicar cambios'); self.apply_btn.clicked.connect(self.apply_properties); side.addWidget(self.apply_btn); side.addStretch(); body.addLayout(side)
         outer.addLayout(body,1); self.setCentralWidget(root)
-        self.setStyleSheet("QWidget#root{background:#0e1117;color:#e7ebf2;font-family:'Segoe UI',sans-serif} QPushButton,QLineEdit,QSpinBox,QListWidget{background:#202735;color:#e7ebf2;border:1px solid #303949;border-radius:5px;padding:6px} QSlider::groove:horizontal{height:4px;background:#354052} QSlider::handle:horizontal{background:#65d6ff;width:12px;margin:-5px 0;border-radius:6px}")
+        self.setStyleSheet("QWidget#root{background:#111317;color:#e7e7e7;font-family:'Segoe UI',sans-serif} QFrame,QListWidget,QLineEdit,QSpinBox,QComboBox{border-radius:7px} QPushButton,QLineEdit,QSpinBox,QListWidget,QComboBox{background:#202226;color:#eee;border:1px solid #363a40;border-radius:7px;padding:5px} QPushButton:hover{background:#30343b} QSplitter::handle:vertical{background:#34363a;height:5px;border-radius:3px} QSplitter::handle:vertical:hover{background:#777} QScrollBar:vertical{background:transparent;width:8px;margin:0} QScrollBar::handle:vertical{background:#52565c;min-height:24px;border-radius:4px} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0} QScrollBar:horizontal{background:#1b1d21;height:8px} QScrollBar::handle:horizontal{background:#52565c;min-width:24px;border-radius:4px} QSlider::groove:horizontal{height:3px;background:#464646;border-radius:2px} QSlider::handle:horizontal{background:#f5bd32;width:11px;margin:-4px 0;border-radius:6px}")
         self.timer=QTimer(self); self.timer.setInterval(40); self.timer.timeout.connect(self.tick); self.set_format_control(); self.refresh_objects()
 
     def set_format_control(self):
@@ -63,6 +70,13 @@ class MainWindow(QMainWindow):
         o=self.state['objects'][row]; self.name.setText(o['name']); self.expr.setText(o['expression']); self.start.setValue(o['start']); self.length.setValue(o['duration']); self.color_btn.setText(o['color']); self.color_btn.setStyleSheet('background:'+o['color']); self.visible.blockSignals(True); self.visible.setChecked(o.get('visible',True)); self.visible.blockSignals(False)
     def add_graph(self):
         self.state['objects'].append({'name':'Nueva gráfica','kind':'graph','expression':'cos(x)','color':'#ffbd69','start':0,'duration':self.state['duration'],'visible':True}); self.refresh_objects(len(self.state['objects'])-1)
+    def add_selected_element(self):
+        row=self.element_list.currentRow()
+        if row<0: return
+        definitions=[('Gráfica seno','graph','sin(x)','#65d6ff'),('Gráfica coseno','graph','cos(x)','#65d6ff'),('Gráfica tangente','graph','tan(x)','#65d6ff'),('Parábola','graph','x^2','#65d6ff'),('Exponencial','graph','exp(x)','#65d6ff'),('Logaritmo','graph','log(x)','#65d6ff'),('Texto','text','Nuevo texto','#f1f4fa'),('Ejes','axes','','#8290a5'),('Punto','point','A','#ffbd69'),('Vector','vector','v','#ffbd69'),('Recta','line','y=x','#65d6ff'),('Círculo','circle','','#65d6ff'),('Elipse','ellipse','','#65d6ff'),('Polígono','polygon','','#65d6ff'),('Flecha','arrow','','#ffbd69'),('Plano cartesiano','axes','','#8290a5'),('Llaves y etiquetas','text','Etiqueta','#f1f4fa'),('Imagen','image','','#65d6ff'),('Tabla','table','','#65d6ff'),('Grupo','group','','#65d6ff')]
+        name,kind,expression,color=definitions[row]; track=self.timeline.selected_track or self.state['tracks'][0]
+        self.state['objects'].append({'name':name,'kind':kind,'expression':expression,'color':color,'start':round(self.timeline.position),'duration':max(1,self.state['duration']-round(self.timeline.position)),'visible':True,'track':track})
+        self.refresh_objects(len(self.state['objects'])-1)
     def delete_object(self):
         row=self.objects.currentRow()
         if row<0:return
@@ -81,17 +95,38 @@ class MainWindow(QMainWindow):
             c=QColorDialog.getColor(QColor(self.state['objects'][row]['color']),self)
             if c.isValid(): self.state['objects'][row]['color']=c.name(); self.select_object(row); self.update_views()
     def update_views(self):
+        snapshot=json.dumps(self.state,sort_keys=True)
+        if snapshot != self._last_snapshot:
+            self._undo_stack.append(self._last_snapshot); self._undo_stack=self._undo_stack[-100:]; self._redo_stack.clear(); self._last_snapshot=snapshot
         self.state['duration']=max([self.state['duration']]+[o['start']+o['duration'] for o in self.state['objects']])
         self.preview.update(); self.timeline.update(); self._update_timeline_scroll()
+    def _restore_history(self, source, destination):
+        if not source:return
+        destination.append(json.dumps(self.state)); self.state=json.loads(source.pop()); self._last_snapshot=json.dumps(self.state,sort_keys=True)
+        self.preview.state=self.state; self.timeline.state=self.state; self.refresh_objects()
+    def undo(self): self._restore_history(self._undo_stack,self._redo_stack)
+    def redo(self): self._restore_history(self._redo_stack,self._undo_stack)
     def _update_timeline_scroll(self):
         self.timeline_scroll.setRange(0,1000000); self.timeline_scroll.setPageStep(self.timeline.visible_seconds)
         self.timeline.tracks=self.state.setdefault('tracks',['Pista 1'])
-        maximum=max(0,len(self.timeline.tracks)-self.timeline.visible_rows)
-        self.track_scroll.setRange(0,maximum); self.track_scroll.setPageStep(self.timeline.visible_rows); self.track_scroll.setSingleStep(1)
+        maximum=max(0,len(self.timeline.tracks)*36-self.timeline.height()+42)
+        self.track_scroll.setRange(0,maximum); self.track_scroll.setPageStep(max(36,self.timeline.height())); self.track_scroll.setSingleStep(18)
         self.timeline.set_row_offset(min(self.track_scroll.value(),maximum))
     def add_track(self):
         self.timeline.add_track()
         self._update_timeline_scroll()
+    def remove_track(self):
+        if not self.timeline.remove_selected_track():
+            QMessageBox.information(self,'Eliminar pista','Selecciona una pista. Debe quedar al menos una pista en el proyecto.')
+        self._update_timeline_scroll()
+    def resize_timeline(self, value):
+        total=max(1,self.vertical_split.height()); bottom=round(total*value/100)
+        self.vertical_split.setSizes([total-bottom,bottom])
+    def trim_clip(self):
+        if not self.timeline.trim_at_playhead():
+            QMessageBox.information(self,'Trim','Selecciona un bloque y coloca el cabezal dentro del clip para dividirlo.')
+        else:
+            self.refresh_objects(min(self.timeline._selected_index+1,len(self.state['objects'])-1))
     def seek(self,v):
         seconds=v if isinstance(v,float) else self.state['duration']*v/100
         seconds=max(0,min(self.state['duration'],seconds)); self.slider.blockSignals(True); self.slider.setValue(round(seconds/max(1,self.state['duration'])*100)); self.slider.blockSignals(False)
@@ -101,7 +136,7 @@ class MainWindow(QMainWindow):
             s,f=divmod(n,30); h,s=divmod(s,3600); m,s=divmod(s,60); return f'{h:02d}:{m:02d}:{s:02d}:{f:02d}'
         self.timecode.setText(f'{tc(frame)} / {tc(total)}')
     def toggle_play(self):
-        self.playing=not self.playing; self.play_btn.setText('❚❚ Pausar' if self.playing else '▶ Reproducir'); self.timer.start() if self.playing else self.timer.stop()
+        self.playing=not self.playing; self.play_btn.setText('❚❚' if self.playing else '▶'); self.play_btn.setToolTip('Pausar' if self.playing else 'Reproducir'); self.timer.start() if self.playing else self.timer.stop()
     def tick(self): self.seek((self.slider.value()+1)%101)
     def new_project(self): self.state=new_project(); self.path=None; self.preview.state=self.state; self.timeline.state=self.state; self.timeline.set_scroll_offset(0); self._update_timeline_scroll(); self.refresh_objects()
     def open_project(self):
