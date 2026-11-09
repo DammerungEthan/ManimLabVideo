@@ -10,9 +10,9 @@ DEFAULT_PROJECT = {
     "height": 1080,
     "tracks": ["Pista 1", "Pista 2", "Pista 3", "Pista 4"],
     "objects": [
-        {"name": "Gráfica seno", "kind": "graph", "expression": "sin(x)", "color": "#65d6ff", "start": 0, "duration": 8, "visible": True},
-        {"name": "Ejes", "kind": "axes", "expression": "", "color": "#8290a5", "start": 0, "duration": 10, "visible": True},
-        {"name": "Título", "kind": "text", "expression": "f(x) = sin(x)", "color": "#f1f4fa", "start": 0, "duration": 10, "visible": True},
+        {"name": "Gráfica seno", "kind": "graph", "expression": "sin(x)", "color": "#65d6ff", "start": 0, "duration": 8, "visible": True, "track": "Pista 1"},
+        {"name": "Ejes", "kind": "axes", "expression": "", "color": "#8290a5", "start": 0, "duration": 10, "visible": True, "track": "Pista 2"},
+        {"name": "Título", "kind": "text", "expression": "f(x) = sin(x)", "color": "#f1f4fa", "start": 0, "duration": 10, "visible": True, "track": "Pista 3"},
     ],
 }
 

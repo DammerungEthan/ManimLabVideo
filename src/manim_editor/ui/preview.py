@@ -34,6 +34,7 @@ class Preview(QWidget):
         self._drag_scale = 1.0
         self._drag_font_size = 16
         self._resize_corner = None
+        self._active_guides = set()
         self.zoom_level = 100
 
         self.size_button = QPushButton("⛶", self)
@@ -328,6 +329,7 @@ class Preview(QWidget):
         point = event.position()
         self._drag_mode = None
         self._resize_corner = None
+        self._active_guides.clear()
         if not self._preview_geometry()["viewport"].contains(point):
             self.selected_index = None
             self.update()
@@ -394,6 +396,20 @@ class Preview(QWidget):
             else:
                 x = max(bounds.width() / 2, min(frame["frame_width"] - bounds.width() / 2, x))
                 y = max(bounds.height() / 2, min(frame["frame_height"] - bounds.height() / 2, y))
+            anchor_x = self._drag_position["x"] * frame["frame_width"]
+            anchor_y = self._drag_position["y"] * frame["frame_height"]
+            center_offset_x = bounds.center().x() - anchor_x
+            center_offset_y = bounds.center().y() - anchor_y
+            center_x = frame["frame_width"] / 2 - center_offset_x
+            center_y = frame["frame_height"] / 2 - center_offset_y
+            snap_tolerance = 8
+            self._active_guides.clear()
+            if abs((x - center_x) * frame["scale_x"]) <= snap_tolerance:
+                x = center_x
+                self._active_guides.add("vertical")
+            if abs((y - center_y) * frame["scale_y"]) <= snap_tolerance:
+                y = center_y
+                self._active_guides.add("horizontal")
             self._set_position(
                 self.selected_index,
                 x,
@@ -401,6 +417,7 @@ class Preview(QWidget):
                 frame,
             )
         else:
+            self._active_guides.clear()
             self._resize_selected(obj, event.position(), frame)
         self.update()
         self._update_related_views()
@@ -454,6 +471,7 @@ class Preview(QWidget):
             self._drag_origin = None
             self._drag_position = None
             self._drag_bounds = None
+            self._active_guides.clear()
             self.update()
             self._update_related_views()
             event.accept()
@@ -594,6 +612,20 @@ class Preview(QWidget):
             )
 
         p.restore()
+        if self._active_guides:
+            p.save()
+            p.setClipRect(frame_rect)
+            guide_pen = QPen(QColor("#ff5f87"), 1, Qt.PenStyle.DashLine)
+            p.setPen(guide_pen)
+            if "vertical" in self._active_guides:
+                center_x = frame_rect.center().x()
+                p.drawLine(int(center_x), int(frame_rect.top()),
+                           int(center_x), int(frame_rect.bottom()))
+            if "horizontal" in self._active_guides:
+                center_y = frame_rect.center().y()
+                p.drawLine(int(frame_rect.left()), int(center_y),
+                           int(frame_rect.right()), int(center_y))
+            p.restore()
         p.setPen(QPen(QColor("#536174"), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(frame_rect)

@@ -1,5 +1,5 @@
 """Línea de tiempo con movimiento y redimensionado de clips."""
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget, QInputDialog
 
@@ -30,9 +30,32 @@ class Timeline(QWidget):
         self.setMouseTracking(True)
         self._scroll_timer=QTimer(self); self._scroll_timer.setInterval(16); self._scroll_timer.timeout.connect(self._animate_scroll)
         self._scroll_target=0
+        self.play_button = None
+        self.position_slider = None
+
+    def set_transport_controls(self, button, slider):
+        """Place the playback controls in the timeline ruler."""
+        self.play_button = button
+        button.setParent(self)
+        button.setFixedSize(30, 25)
+        button.show()
+        self.position_slider = slider
+        slider.setParent(self)
+        slider.show()
+        self._position_transport_controls()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_transport_controls()
+
+    def _position_transport_controls(self):
+        if self.play_button is not None:
+            self.play_button.move(5, 2)
+        if self.position_slider is not None:
+            self.position_slider.setGeometry(39, 4, max(1, self.width()-43), 22)
 
     def _geometry(self):
-        return 130, 34, max(1, self.width()-150), max(1, self.visible_seconds)
+        return 130, 54, max(1, self.width()-150), max(1, self.visible_seconds)
 
     def _clip_rect(self, i, obj):
         left, top, width, duration = self._geometry()
@@ -58,7 +81,7 @@ class Timeline(QWidget):
             x=left+width*(sec-self.scroll_offset)/scale; p.setPen(QColor("#343d4b")); p.drawLine(int(x),top,int(x),self.height()-8)
             hours, remainder = divmod(sec, 3600); minutes, seconds = divmod(remainder, 60)
             label=f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            p.setPen(QColor("#8490a2")); p.drawText(int(x-28),22,label)
+            p.setPen(QColor("#8490a2")); p.drawText(int(x-28),top-8,label)
         p.save(); p.setClipRect(0,top,self.width(),self.height()-top)
         for track_index in range(len(self.tracks)):
             track=self.tracks[track_index]; y=top+8+track_index*36-self.track_scroll_px
@@ -78,7 +101,10 @@ class Timeline(QWidget):
         p.restore()
         current=self.position
         if self.scroll_offset <= current <= self.scroll_offset+scale:
-            x=left+width*(current-self.scroll_offset)/scale; p.setPen(QPen(QColor("#ffbd69"),2)); p.drawLine(int(x),28,int(x),self.height()-5)
+            x=left+width*(current-self.scroll_offset)/scale
+            p.setPen(QPen(QColor("#ffbd69"),2)); p.drawLine(int(x),0,int(x),self.height()-5)
+            p.setBrush(QColor("#ffbd69")); p.setPen(Qt.PenStyle.NoPen)
+            p.drawPolygon([QPoint(int(x)-5, 0), QPoint(int(x)+5, 0), QPoint(int(x), 7)])
 
     def _hit(self,x,y):
         for i,obj in enumerate(self.state["objects"]):
@@ -139,7 +165,7 @@ class Timeline(QWidget):
             if event.buttons() & Qt.MouseButton.LeftButton:self._seek_at(x)
             return
         left,_,width,scale=self._geometry(); obj=self.state["objects"][self._drag_index]
-        row_height=36; first_y=42
+        row_height=36; first_y=self._geometry()[1]+8
         target=max(0,min(len(self.tracks)-1,int((y-first_y)/row_height)+self.row_offset))
         if self._drag_mode=="move" and self.tracks:
             obj["track"]=self.tracks[target]

@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter,
@@ -27,7 +27,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Manim Editor'); self.resize(1360,850)
         self._undo_stack=[]; self._redo_stack=[]; self._last_snapshot=json.dumps(self.state,sort_keys=True)
         root=QWidget(); root.setObjectName('root'); outer=QVBoxLayout(root); outer.setContentsMargins(8,8,8,8)
-        bar=QHBoxLayout(); self.project_label=QLabel(self.state['name']); bar.addWidget(self.project_label); bar.addStretch()
+        bar=QHBoxLayout()
+        app_icon=QLabel(); app_icon.setFixedSize(28,28); app_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_pixmap=QPixmap(os.path.join(os.path.dirname(__file__),'icons','icon.png'))
+        if not icon_pixmap.isNull():
+            app_icon.setPixmap(icon_pixmap.scaled(28,28,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+            bar.addWidget(app_icon)
+        self.project_label=QLabel(self.state['name']); bar.addWidget(self.project_label); bar.addStretch()
         self.workspace_tab_bar=QTabBar(); self.workspace_tab_bar.setExpanding(False); self.workspace_tab_bar.setDrawBase(False); self.workspace_tab_bar.setMovable(False)
         self.workspace_tab_bar.addTab('▶  Video'); self.workspace_tab_bar.addTab('</>  Código Manim')
         self.workspace_tab_bar.setStyleSheet('QTabBar::tab{background:#1b1d21;color:#aeb4bd;padding:7px 14px;border:1px solid #30343a;border-bottom:0;border-top-left-radius:6px;border-top-right-radius:6px;margin-right:3px} QTabBar::tab:selected{background:#292d33;color:#f1f4fa} QTabBar::tab:hover:!selected{background:#24272c}')
@@ -56,7 +62,7 @@ class MainWindow(QMainWindow):
         self.slider=QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0,100); self.slider.setValue(38); self.slider.valueChanged.connect(self.seek)
         self.timecode=QLabel('00:00:03:24 / 00:00:10:00'); self.timecode.setMinimumWidth(190)
         self.trim_button=QPushButton('✂ Trim'); self.trim_button.setToolTip('Dividir el clip seleccionado en el cabezal'); self.trim_button.clicked.connect(self.trim_clip)
-        timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); timeline_row.addWidget(self.timeline,1)
+        timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); self.timeline.set_transport_controls(self.play_btn, self.slider); timeline_row.addWidget(self.timeline,1)
         self.track_scroll=QScrollBar(Qt.Orientation.Vertical); self.track_scroll.valueChanged.connect(self.timeline.set_row_offset); self.track_scroll.setSingleStep(1); timeline_row.addWidget(self.track_scroll)
         self.timeline_area=QWidget(); self.timeline_area.setLayout(timeline_row)
         self.vertical_split=QSplitter(Qt.Orientation.Vertical); self.vertical_split.setChildrenCollapsible(False); self.vertical_split.addWidget(self.preview); self.vertical_split.addWidget(self.timeline_area); self.vertical_split.setStretchFactor(0,1); self.vertical_split.setSizes([560,190])
@@ -64,7 +70,7 @@ class MainWindow(QMainWindow):
         for label,factor in [('−',1.25),('+',0.8)]:
             button=QPushButton(label); button.clicked.connect(lambda _=False,f=factor:self.timeline.zoom(f)); zoom_row.addWidget(button)
         zoom_row.addStretch()
-        transport=QHBoxLayout(); transport.addWidget(self.play_btn); transport.addWidget(self.slider,1); transport.addWidget(self.timecode); transport.addWidget(self.trim_button)
+        transport=QHBoxLayout(); transport.addWidget(self.timecode); transport.addWidget(self.trim_button)
         self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset)
 
         video_page=QWidget(); video_layout=QVBoxLayout(video_page); video_layout.setContentsMargins(0,0,0,0)
@@ -112,12 +118,13 @@ class MainWindow(QMainWindow):
         if row<0 or row>=len(self.state['objects']): return
         o=self.state['objects'][row]; self.name.setText(o['name']); self.expr.setText(o['expression']); self.start.setValue(o['start']); self.length.setValue(o['duration']); self.color_btn.setText(o['color']); self.color_btn.setStyleSheet('background:'+o['color']); self.visible.blockSignals(True); self.visible.setChecked(o.get('visible',True)); self.visible.blockSignals(False)
     def add_graph(self):
-        self.state['objects'].append({'name':'Nueva gráfica','kind':'graph','expression':'cos(x)','color':'#ffbd69','start':0,'duration':self.state['duration'],'visible':True}); self.refresh_objects(len(self.state['objects'])-1)
+        track=self.state.setdefault('tracks',['Pista 1'])[-1]
+        self.state['objects'].append({'name':'Nueva gráfica','kind':'graph','expression':'cos(x)','color':'#ffbd69','start':0,'duration':self.state['duration'],'visible':True,'track':track}); self.refresh_objects(len(self.state['objects'])-1)
     def add_selected_element(self):
         row=self.element_list.currentRow()
         if row<0: return
         definitions=[('Gráfica seno','graph','sin(x)','#65d6ff'),('Gráfica coseno','graph','cos(x)','#65d6ff'),('Gráfica tangente','graph','tan(x)','#65d6ff'),('Parábola','graph','x^2','#65d6ff'),('Exponencial','graph','exp(x)','#65d6ff'),('Logaritmo','graph','log(x)','#65d6ff'),('Texto','text','Nuevo texto','#f1f4fa'),('Ejes','axes','','#8290a5'),('Punto','point','A','#ffbd69'),('Vector','vector','v','#ffbd69'),('Recta','line','y=x','#65d6ff'),('Círculo','circle','','#65d6ff'),('Elipse','ellipse','','#65d6ff'),('Polígono','polygon','','#65d6ff'),('Flecha','arrow','','#ffbd69'),('Plano cartesiano','axes','','#8290a5'),('Llaves y etiquetas','text','Etiqueta','#f1f4fa'),('Imagen','image','','#65d6ff'),('Tabla','table','','#65d6ff'),('Grupo','group','','#65d6ff')]
-        name,kind,expression,color=definitions[row]; track=self.timeline.selected_track or self.state['tracks'][0]
+        name,kind,expression,color=definitions[row]; track=self.state.setdefault('tracks',['Pista 1'])[-1]
         self.state['objects'].append({'name':name,'kind':kind,'expression':expression,'color':color,'start':round(self.timeline.position),'duration':max(1,self.state['duration']-round(self.timeline.position)),'visible':True,'track':track})
         self.refresh_objects(len(self.state['objects'])-1)
     def delete_object(self):
@@ -417,7 +424,7 @@ class MainWindow(QMainWindow):
             if parsed is not None:
                 parsed['track']=tracks_by_variable.get(
                     target.id,
-                    tracks_by_name.get(parsed.get('name'), self.state.get('tracks',['Pista 1'])[0]),
+                    tracks_by_name.get(parsed.get('name'), self.state.get('tracks',['Pista 1'])[-1]),
                 )
                 objects[target.id]=parsed
 
