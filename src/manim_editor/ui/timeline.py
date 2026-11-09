@@ -5,26 +5,25 @@ from PySide6.QtWidgets import QWidget, QInputDialog
 
 
 class Timeline(QWidget):
+    """Vista y edición de clips, pistas y posición de reproducción."""
+
     EDGE = 7
 
-    def __init__(self, state, on_seek, on_change=None, on_scroll=None):
+    def __init__(self, state, on_seek, on_change=None):
         super().__init__()
         self.state, self.on_seek = state, on_seek
         self.on_change = on_change or (lambda: None)
         self.scroll_offset = 0
         self.visible_seconds = 20
-        self.visible_rows = 2
         self.row_offset = 0
         self.track_scroll_px = 0
         self.tracks = []
         self.selected_track = None
-        self.on_scroll = on_scroll or (lambda value: None)
         self.position = 38
         self._drag_index = None
         self._drag_mode = None
         self._offset = 0
         self._fixed_end = 0
-        self._target_track = 0
         self.setMaximumWidth(1000)
         self.setMinimumHeight(155)
         self.setMouseTracking(True)
@@ -66,6 +65,7 @@ class Timeline(QWidget):
     def paintEvent(self, _event):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor("#151922"))
+        # Dibuja la regla de tiempo y las pistas a partir del estado del proyecto.
         self.tracks=self.state.setdefault("tracks", ["Pista 1"])
         # Repair malformed/legacy projects before drawing: a clip always belongs
         # to exactly one existing track, and track names are unique.
@@ -164,6 +164,7 @@ class Timeline(QWidget):
             i,mode,_=self._hit(x,y); self.setCursor(Qt.CursorShape.SizeHorCursor if i is not None and mode in ("left","right") else Qt.CursorShape.OpenHandCursor if i is not None else Qt.CursorShape.ArrowCursor)
             if event.buttons() & Qt.MouseButton.LeftButton:self._seek_at(x)
             return
+        # Al arrastrar un clip, actualiza su pista, inicio o duración.
         left,_,width,scale=self._geometry(); obj=self.state["objects"][self._drag_index]
         row_height=36; first_y=self._geometry()[1]+8
         target=max(0,min(len(self.tracks)-1,int((y-first_y)/row_height)+self.row_offset))

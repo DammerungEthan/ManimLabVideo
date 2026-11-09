@@ -43,6 +43,22 @@ En Windows, si el comando `python` no está disponible, prueba `py -m pip instal
 
 La interfaz está construida con PySide6. Manim se integrará como motor de escenas y renderizado en una etapa posterior.
 
+### Estructura del código
+
+```text
+src/manim_editor/
+├── app.py                 # Punto de entrada del comando manim-editor
+├── models/                # Estado inicial y normalización de proyectos
+├── services/              # Lectura y escritura de proyectos
+├── ui/
+│   ├── main_window.py     # Ventana principal y coordinación de la interfaz
+│   ├── preview.py         # Dibujo e interacción con los elementos
+│   └── timeline.py        # Pistas, clips y cabezal de reproducción
+└── icons/                 # Recursos gráficos de la aplicación
+```
+
+Los cambios de interfaz van en `ui/`, las reglas del formato del proyecto en `models/` y las operaciones de entrada/salida en `services/`. `app.py` solo inicia Qt y muestra `MainWindow`.
+
 ## Licencia
 
 MIT. Consulta el archivo `LICENSE`.

@@ -10,19 +10,17 @@ from PySide6.QtWidgets import (
 
 
 class Preview(QWidget):
+    """Dibuja la escena y permite seleccionar, mover y redimensionar objetos."""
+
     def __init__(self, state):
         super().__init__()
         self.state = state
         self.progress = 0.38
         self.setMinimumSize(420, 270)
         self._expanded = False
-        self._original_parent = None
-        self._original_layout = None
-        self._original_index = -1
         self._original_splitter = None
         self._original_splitter_sizes = None
         self._hidden_app_widgets = []
-        self._original_window_flags = self.windowFlags()
         self.selected_index = None
         self._object_bounds = {}
         self._object_frame_bounds = {}
@@ -148,18 +146,6 @@ class Preview(QWidget):
         super().resizeEvent(event)
         self._position_size_button()
 
-    def _find_containing_layout(self, layout):
-        for index in range(layout.count()):
-            item = layout.itemAt(index)
-            if item.widget() is self:
-                return layout, index
-            child_layout = item.layout()
-            if child_layout is not None:
-                result = self._find_containing_layout(child_layout)
-                if result is not None:
-                    return result
-        return None
-
     def toggle_size(self):
         if self._expanded:
             self._restore_size()
@@ -189,6 +175,7 @@ class Preview(QWidget):
         parent = self.parentWidget()
         if not isinstance(parent, QSplitter):
             return
+        # Guarda el contenedor y su distribución para restaurarlos al cerrar.
         self._original_splitter = parent
         self._original_splitter_sizes = parent.sizes()
         self._expanded = True
@@ -292,7 +279,11 @@ class Preview(QWidget):
         self._update_related_views()
 
     def _update_related_views(self):
-        view_window = self._original_parent.window() if self._expanded else self.window()
+        view_window = (
+            self._original_splitter.window()
+            if self._expanded and self._original_splitter is not None
+            else self.window()
+        )
         for widget in view_window.findChildren(QWidget):
             if widget is not self and getattr(widget, "state", None) is self.state:
                 widget.update()
@@ -396,6 +387,7 @@ class Preview(QWidget):
             else:
                 x = max(bounds.width() / 2, min(frame["frame_width"] - bounds.width() / 2, x))
                 y = max(bounds.height() / 2, min(frame["frame_height"] - bounds.height() / 2, y))
+            # Ajusta el ancla del objeto al centro y muestra guías magnéticas.
             anchor_x = self._drag_position["x"] * frame["frame_width"]
             anchor_y = self._drag_position["y"] * frame["frame_height"]
             center_offset_x = bounds.center().x() - anchor_x
@@ -488,6 +480,8 @@ class Preview(QWidget):
         self._object_bounds = {}
         self._object_frame_bounds = {}
         self._object_positions = {}
+        # Dibuja los objetos en coordenadas del lienzo y guarda sus límites
+        # para hit-testing, selección y redimensionado.
         p.save()
         p.setClipRect(viewport)
         p.fillRect(frame_rect, QColor("#000000"))

@@ -23,7 +23,7 @@ def new_project() -> dict:
 
 
 def normalize_project(data: dict) -> dict:
-    """Completa campos opcionales para mantener compatibilidad entre versiones."""
+    """Valida la estructura básica y completa campos opcionales antiguos."""
     if not isinstance(data, dict) or not isinstance(data.get("objects"), list):
         raise ValueError("El archivo no contiene un proyecto válido.")
     project = new_project()
