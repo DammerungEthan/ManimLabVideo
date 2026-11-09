@@ -1,6 +1,7 @@
 """Prototipo funcional de editor de escenas con persistencia JSON."""
 import ast
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -67,7 +68,7 @@ class MainWindow(QMainWindow):
         self.slider=QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0,100); self.slider.setValue(38); self.slider.valueChanged.connect(self.seek)
         self.timecode=QLabel('00:00:03:24 / 00:00:10:00'); self.timecode.setMinimumWidth(190)
         self.trim_button=QPushButton('✂ Trim'); self.trim_button.setToolTip('Dividir el clip seleccionado en el cabezal'); self.trim_button.clicked.connect(self.trim_clip)
-        timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); self.timeline.set_transport_controls(self.play_btn, self.slider); timeline_row.addWidget(self.timeline,1)
+        timeline_row=QHBoxLayout(); self.timeline=Timeline(self.state, self.seek, self.update_views); self.timeline.set_transport_controls(self.play_btn, self.slider, self.timecode); timeline_row.addWidget(self.timeline,1)
         self.track_scroll=QScrollBar(Qt.Orientation.Vertical); self.track_scroll.valueChanged.connect(self.timeline.set_row_offset); self.track_scroll.setSingleStep(1); timeline_row.addWidget(self.track_scroll)
         self.timeline_area=QWidget(); self.timeline_area.setLayout(timeline_row)
         self.vertical_split=QSplitter(Qt.Orientation.Vertical); self.vertical_split.setChildrenCollapsible(False); self.vertical_split.addWidget(self.preview); self.vertical_split.addWidget(self.timeline_area); self.vertical_split.setStretchFactor(0,1); self.vertical_split.setSizes([560,190])
@@ -75,7 +76,7 @@ class MainWindow(QMainWindow):
         for label,factor in [('−',1.25),('+',0.8)]:
             button=QPushButton(label); button.clicked.connect(lambda _=False,f=factor:self.timeline.zoom(f)); zoom_row.addWidget(button)
         zoom_row.addStretch()
-        transport=QHBoxLayout(); transport.addWidget(self.timecode); transport.addWidget(self.trim_button)
+        transport=QHBoxLayout(); transport.addWidget(self.trim_button)
         self.timeline_scroll=QScrollBar(Qt.Orientation.Horizontal); self.timeline_scroll.valueChanged.connect(self.timeline.set_scroll_offset)
 
         video_page=QWidget(); video_layout=QVBoxLayout(video_page); video_layout.setContentsMargins(0,0,0,0)
@@ -243,6 +244,9 @@ class MainWindow(QMainWindow):
             object_scale=float(obj.get('scale',1.0))
             if kind not in {'text','group'} and object_scale != 1.0:
                 definition += f'.scale({object_scale:.4f})'
+            object_rotation=float(obj.get('rotation',0.0))
+            if object_rotation != 0.0:
+                definition += f'.rotate({object_rotation:.4f} * DEGREES)'
 
             supported += 1
             lines.extend('        ' + part.lstrip() for part in definition.splitlines())
@@ -310,7 +314,7 @@ class MainWindow(QMainWindow):
         while (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {'move_to', 'scale', 'set_color'}
+            and node.func.attr in {'move_to', 'scale', 'set_color', 'rotate'}
         ):
             transforms.append(node)
             node=node.func.value
@@ -386,6 +390,18 @@ class MainWindow(QMainWindow):
                 obj['color']=self._code_literal(value, obj['color'])
             elif method=='scale':
                 obj['scale']=float(self._code_literal(value, 1.0))
+            elif method=='rotate':
+                if (
+                    isinstance(value, ast.BinOp)
+                    and isinstance(value.op, ast.Mult)
+                    and isinstance(value.right, ast.Name)
+                    and value.right.id == 'DEGREES'
+                ):
+                    obj['rotation']=float(self._code_literal(value.left, 0.0))
+                else:
+                    angle=self._code_literal(value)
+                    if isinstance(angle,(int,float)):
+                        obj['rotation']=math.degrees(float(angle))
             elif method=='move_to':
                 point=self._code_literal(value)
                 if isinstance(point, (list, tuple)) and len(point)>=2:

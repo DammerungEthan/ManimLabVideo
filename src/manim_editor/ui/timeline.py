@@ -31,8 +31,9 @@ class Timeline(QWidget):
         self._scroll_target=0
         self.play_button = None
         self.position_slider = None
+        self.timecode_label = None
 
-    def set_transport_controls(self, button, slider):
+    def set_transport_controls(self, button, slider, timecode_label=None):
         """Place the playback controls in the timeline ruler."""
         self.play_button = button
         button.setParent(self)
@@ -41,6 +42,12 @@ class Timeline(QWidget):
         self.position_slider = slider
         slider.setParent(self)
         slider.show()
+        self.timecode_label = timecode_label
+        if timecode_label is not None:
+            timecode_label.setParent(self)
+            timecode_label.setFixedSize(190, 22)
+            timecode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            timecode_label.show()
         self._position_transport_controls()
 
     def resizeEvent(self, event):
@@ -50,8 +57,13 @@ class Timeline(QWidget):
     def _position_transport_controls(self):
         if self.play_button is not None:
             self.play_button.move(5, 2)
+        label_width = self.timecode_label.width() if self.timecode_label is not None else 0
+        label_x = self.width() - label_width - 5
         if self.position_slider is not None:
-            self.position_slider.setGeometry(39, 4, max(1, self.width()-43), 22)
+            slider_right = label_x - 4 if self.timecode_label is not None else self.width() - 4
+            self.position_slider.setGeometry(39, 4, max(1, slider_right - 39), 22)
+        if self.timecode_label is not None:
+            self.timecode_label.move(label_x, 4)
 
     def _geometry(self):
         return 130, 54, max(1, self.width()-150), max(1, self.visible_seconds)

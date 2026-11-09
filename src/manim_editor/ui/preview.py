@@ -1,11 +1,14 @@
 """Widget de vista previa para escenas matemáticas."""
 import math
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetricsF, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import (
+    QColor, QFont, QFontDatabase, QFontMetricsF, QIcon, QPainter, QPen,
+    QPixmap, QPolygonF, QTransform,
+)
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-    QLabel, QLineEdit, QPushButton, QScrollBar, QSpinBox, QSplitter, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
+    QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter, QToolButton, QWidget,
 )
 
 
@@ -25,14 +28,19 @@ class Preview(QWidget):
         self._object_bounds = {}
         self._object_frame_bounds = {}
         self._object_positions = {}
+        self._object_rotation_anchors = {}
+        self._object_selection_corners = {}
+        self._object_alignment_centers = {}
         self._drag_mode = None
         self._drag_origin = None
         self._drag_position = None
         self._drag_bounds = None
         self._drag_scale = 1.0
         self._drag_font_size = 16
+        self._drag_rotation = 0.0
+        self._rotation_origin_angle = 0.0
         self._resize_corner = None
-        self._active_guides = set()
+        self._active_guides = {}
         self.zoom_level = 100
 
         self.size_button = QPushButton("⛶", self)
@@ -57,6 +65,21 @@ class Preview(QWidget):
         )
         self.text_button.clicked.connect(self.add_text)
 
+        self.shape_button = QToolButton(self)
+        self.shape_button.setText("◇")
+        self.shape_button.setToolTip("Agregar figura geométrica")
+        self.shape_button.setAccessibleName("Agregar figura geométrica")
+        self.shape_button.setFixedSize(36, 32)
+        self.shape_button.setStyleSheet(
+            "QToolButton { background: #202735; color: #e7ebf2; "
+            "border: 1px solid #536174; border-radius: 5px; font-size: 18px; }"
+            "QToolButton:hover { background: #354052; }"
+        )
+        self.shape_menu = QMenu(self.shape_button)
+        self.shape_button.setMenu(self.shape_menu)
+        self.shape_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._add_shape_menu_actions()
+
         self.zoom_bar = QScrollBar(Qt.Orientation.Vertical, self)
         self.zoom_bar.setRange(50, 200)
         self.zoom_bar.setValue(self.zoom_level)
@@ -80,7 +103,10 @@ class Preview(QWidget):
 
     def _position_size_button(self):
         render_only = self.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
-        for control in (self.size_button, self.text_button, self.zoom_bar, self.zoom_label):
+        for control in (
+            self.size_button, self.text_button, self.shape_button,
+            self.zoom_bar, self.zoom_label,
+        ):
             control.setVisible(not render_only)
         if render_only:
             return
@@ -88,9 +114,11 @@ class Preview(QWidget):
         button_x = right - self.size_button.width()
         first_y = 8
         self.size_button.move(button_x, first_y)
-        self.text_button.move(
-            right - self.text_button.width(),
-            first_y + self.size_button.height() + 8,
+        text_y = max(8, (self.height() - self.text_button.height()) // 2)
+        self.text_button.move(right - self.text_button.width(), text_y)
+        self.shape_button.move(
+            right - self.shape_button.width(),
+            text_y + self.text_button.height() + 6,
         )
         self.zoom_bar.move(
             self.width() - self.zoom_bar.width() - 8,
@@ -242,6 +270,23 @@ class Preview(QWidget):
             font_weight.addItem(label, int(weight))
         font_weight.setCurrentIndex(1)
 
+        def update_font_previews(*_):
+            # La lista sirve para reconocer la familia; el tamaño elegido se
+            # aplica al texto de la escena, no a la muestra del desplegable.
+            weight = QFont.Weight(font_weight.currentData())
+            for index in range(font_family.count()):
+                family = font_family.itemText(index)
+                font_family.setItemData(
+                    index,
+                    QFont(family, 12, weight),
+                    Qt.ItemDataRole.FontRole,
+                )
+            font_family.setFont(QFont(font_family.currentText(), 12, weight))
+
+        font_family.currentTextChanged.connect(update_font_previews)
+        font_weight.currentIndexChanged.connect(update_font_previews)
+        update_font_previews()
+
         form.addRow("Texto", content)
         form.addRow("Fuente", font_family)
         form.addRow("Tamaño", font_size)
@@ -261,19 +306,126 @@ class Preview(QWidget):
 
         text_count = sum(obj.get("kind") == "text" for obj in self.state.get("objects", []))
         frame = self._preview_geometry()
+        start = self.progress * self.state.get("duration", 10)
         self.state.setdefault("objects", []).append({
             "name": expression[:24],
             "kind": "text",
             "expression": expression,
             "color": "#f1f4fa",
-            "start": 0,
-            "duration": max(1, int(self.state.get("duration", 10))),
+            "start": start,
+            "duration": max(0.1, self.state.get("duration", 10) - start),
             "visible": True,
+            "track": self._track_for_new_object(),
             "position": {"x": 0.04, "y": min(0.85, (36 + text_count * 56) / frame["frame_height"])},
             "scale": 1.0,
             "font_family": font_family.currentText(),
             "font_size": font_size.value(),
             "font_weight": font_weight.currentData(),
+        })
+        self.update()
+        self._update_related_views()
+
+    def _add_shape_menu_actions(self):
+        """Crea las opciones de figuras que el preview sabe dibujar."""
+        shapes = (
+            ("Punto", "point", "A", "#ffbd69"),
+            ("Recta", "line", "y=x", "#65d6ff"),
+            ("Vector", "vector", "v", "#ffbd69"),
+            ("Flecha", "arrow", "", "#ffbd69"),
+            ("Círculo", "circle", "", "#65d6ff"),
+            ("Elipse", "ellipse", "", "#65d6ff"),
+            ("Triángulo", "polygon", "", "#65d6ff"),
+            ("Ejes cartesianos", "axes", "", "#8290a5"),
+        )
+        for label, kind, expression, color in shapes:
+            action = self.shape_menu.addAction(self._shape_icon(kind, color), "")
+            action.setToolTip(label)
+            action.setStatusTip(label)
+            action.triggered.connect(
+                lambda _checked=False, item=(label, kind, expression, color):
+                    self.add_geometric_shape(*item)
+            )
+
+    @staticmethod
+    def _shape_icon(kind, color):
+        """Dibuja un icono compacto para una figura del menú."""
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), 2.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if kind == "point":
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(QPointF(16, 16), 4, 4)
+        elif kind == "line":
+            painter.drawLine(QPointF(5, 26), QPointF(27, 6))
+        elif kind == "vector":
+            painter.drawLine(QPointF(6, 25), QPointF(25, 6))
+            painter.drawLine(QPointF(25, 6), QPointF(17, 8))
+            painter.drawLine(QPointF(25, 6), QPointF(23, 14))
+        elif kind == "arrow":
+            painter.drawLine(QPointF(4, 16), QPointF(27, 16))
+            painter.drawLine(QPointF(27, 16), QPointF(19, 9))
+            painter.drawLine(QPointF(27, 16), QPointF(19, 23))
+        elif kind == "circle":
+            painter.drawEllipse(QPointF(16, 16), 10, 10)
+        elif kind == "ellipse":
+            painter.drawEllipse(QRectF(4, 10, 24, 12))
+        elif kind == "polygon":
+            painter.drawPolygon([
+                QPointF(16, 4), QPointF(4, 27), QPointF(28, 27),
+            ])
+        elif kind == "axes":
+            painter.drawLine(QPointF(4, 24), QPointF(28, 24))
+            painter.drawLine(QPointF(8, 28), QPointF(8, 4))
+            painter.drawLine(QPointF(28, 24), QPointF(24, 21))
+            painter.drawLine(QPointF(28, 24), QPointF(24, 27))
+            painter.drawLine(QPointF(8, 4), QPointF(5, 8))
+            painter.drawLine(QPointF(8, 4), QPointF(11, 8))
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _track_for_new_object(self):
+        """Usa una pista vacía o crea una para separar los elementos nuevos."""
+        tracks = self.state.setdefault("tracks", ["Pista 1"])
+        used_tracks = {
+            obj.get("track", tracks[0])
+            for obj in self.state.get("objects", [])
+        }
+        unused_track = next(
+            (track for track in reversed(tracks) if track not in used_tracks),
+            None,
+        )
+        if unused_track is not None:
+            return unused_track
+
+        number = 1
+        while f"Pista {number}" in tracks:
+            number += 1
+        new_track = f"Pista {number}"
+        tracks.append(new_track)
+        return new_track
+
+    def add_geometric_shape(self, name, kind, expression, color):
+        """Añade una figura centrada y sincroniza la lista y el timeline."""
+        duration = max(0.1, float(self.state.get("duration", 10)))
+        start = min(duration, self.progress * duration)
+        self.state.setdefault("objects", []).append({
+            "name": name,
+            "kind": kind,
+            "expression": expression,
+            "color": color,
+            "start": start,
+            "duration": max(0.1, duration - start),
+            "visible": True,
+            "track": self._track_for_new_object(),
+            "position": {"x": 0.5, "y": 0.5},
+            "scale": 1.0,
         })
         self.update()
         self._update_related_views()
@@ -313,6 +465,17 @@ class Preview(QWidget):
             "y": max(0.0, min(1.0, y / frame["frame_height"])),
         }
 
+    @staticmethod
+    def _rotation_handle_position(corners):
+        top_mid = (corners[0] + corners[1]) / 2
+        center = sum(corners, QPointF()) / 4
+        direction = top_mid - center
+        length = math.hypot(direction.x(), direction.y()) or 1.0
+        handle = top_mid + direction * (22 / length)
+        if handle.y() < 8:
+            handle = QPointF(handle.x(), 8)
+        return top_mid, handle
+
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
@@ -327,21 +490,23 @@ class Preview(QWidget):
             event.accept()
             return
         if self.selected_index in self._object_bounds:
-            rect = self._object_bounds[self.selected_index]
+            corners = self._object_selection_corners[self.selected_index]
+            _top_mid, rotation_handle = self._rotation_handle_position(corners)
+            if math.hypot(
+                point.x() - rotation_handle.x(),
+                point.y() - rotation_handle.y(),
+            ) <= 11:
+                self._drag_mode = "rotate"
             handle_size = 10
-            corners = (
-                (rect.topLeft(), "top_left"),
-                (rect.topRight(), "top_right"),
-                (rect.bottomRight(), "bottom_right"),
-                (rect.bottomLeft(), "bottom_left"),
-            )
-            for corner, name in corners:
-                handle = QRectF(corner.x() - handle_size, corner.y() - handle_size,
-                                handle_size * 2, handle_size * 2)
-                if handle.contains(point):
-                    self._drag_mode = "resize"
-                    self._resize_corner = name
-                    break
+            corners = tuple(zip(corners, ("top_left", "top_right", "bottom_right", "bottom_left")))
+            if self._drag_mode is None:
+                for corner, name in corners:
+                    handle = QRectF(corner.x() - handle_size, corner.y() - handle_size,
+                                    handle_size * 2, handle_size * 2)
+                    if handle.contains(point):
+                        self._drag_mode = "resize"
+                        self._resize_corner = name
+                        break
 
         if self._drag_mode is None:
             hit_index = next(
@@ -366,6 +531,12 @@ class Preview(QWidget):
         obj = self.state["objects"][self.selected_index]
         self._drag_scale = float(obj.get("scale", 1.0))
         self._drag_font_size = int(obj.get("font_size", 16))
+        self._drag_rotation = float(obj.get("rotation", 0.0))
+        if self._drag_mode == "rotate":
+            anchor = self._object_rotation_anchors[self.selected_index]
+            self._rotation_origin_angle = math.atan2(
+                point.y() - anchor.y(), point.x() - anchor.x(),
+            )
         self.update()
         event.accept()
 
@@ -377,7 +548,26 @@ class Preview(QWidget):
         obj = self.state["objects"][self.selected_index]
         dx = event.position().x() - self._drag_origin.x()
         dy = event.position().y() - self._drag_origin.y()
-        if self._drag_mode == "move":
+        if self._drag_mode == "rotate":
+            anchor = self._object_rotation_anchors[self.selected_index]
+            current_angle = math.atan2(
+                event.position().y() - anchor.y(),
+                event.position().x() - anchor.x(),
+            )
+            # Qt dibuja con el eje Y hacia abajo; invierte el signo para
+            # guardar ángulos positivos en el sentido matemático de Manim.
+            delta = -math.degrees(current_angle - self._rotation_origin_angle)
+            rotation = (self._drag_rotation + delta + 180) % 360 - 180
+            nearest_axis = round(rotation / 90) * 90
+            self._active_guides.clear()
+            if abs(rotation - nearest_axis) <= 4:
+                rotation = (nearest_axis + 180) % 360 - 180
+                pivot_x = (anchor.x() - frame["x"]) / frame["scale_x"]
+                pivot_y = (anchor.y() - frame["y"]) / frame["scale_y"]
+                self._active_guides["vertical"] = pivot_x
+                self._active_guides["horizontal"] = pivot_y
+            obj["rotation"] = rotation
+        elif self._drag_mode == "move":
             bounds = self._drag_bounds
             x = self._drag_position["x"] * frame["frame_width"] + dx / frame["scale_x"]
             y = self._drag_position["y"] * frame["frame_height"] + dy / frame["scale_y"]
@@ -390,18 +580,27 @@ class Preview(QWidget):
             # Ajusta el ancla del objeto al centro y muestra guías magnéticas.
             anchor_x = self._drag_position["x"] * frame["frame_width"]
             anchor_y = self._drag_position["y"] * frame["frame_height"]
+            # El giro y las guías usan el centro visual del elemento. En los
+            # textos la posición guardada es la esquina superior izquierda.
             center_offset_x = bounds.center().x() - anchor_x
             center_offset_y = bounds.center().y() - anchor_y
-            center_x = frame["frame_width"] / 2 - center_offset_x
-            center_y = frame["frame_height"] / 2 - center_offset_y
             snap_tolerance = 8
             self._active_guides.clear()
-            if abs((x - center_x) * frame["scale_x"]) <= snap_tolerance:
-                x = center_x
-                self._active_guides.add("vertical")
-            if abs((y - center_y) * frame["scale_y"]) <= snap_tolerance:
-                y = center_y
-                self._active_guides.add("horizontal")
+            targets_x = [(frame["frame_width"] / 2, None)]
+            targets_y = [(frame["frame_height"] / 2, None)]
+            for other_index, other_center in self._object_alignment_centers.items():
+                if other_index != self.selected_index:
+                    targets_x.append((other_center.x(), other_index))
+                    targets_y.append((other_center.y(), other_index))
+            center_x, center_y = x + center_offset_x, y + center_offset_y
+            nearest_x = min(targets_x, key=lambda item: abs(item[0] - center_x))
+            nearest_y = min(targets_y, key=lambda item: abs(item[0] - center_y))
+            if abs((nearest_x[0] - center_x) * frame["scale_x"]) <= snap_tolerance:
+                x += nearest_x[0] - center_x
+                self._active_guides["vertical"] = nearest_x[0]
+            if abs((nearest_y[0] - center_y) * frame["scale_y"]) <= snap_tolerance:
+                y += nearest_y[0] - center_y
+                self._active_guides["horizontal"] = nearest_y[0]
             self._set_position(
                 self.selected_index,
                 x,
@@ -424,8 +623,19 @@ class Preview(QWidget):
             "bottom_left": (-1, 1),
         }
         sign_x, sign_y = signs[self._resize_corner]
-        pointer_x = (point.x() - frame["x"]) / frame["scale_x"]
-        pointer_y = (point.y() - frame["y"]) / frame["scale_y"]
+        pointer = QPointF(
+            (point.x() - frame["x"]) / frame["scale_x"],
+            (point.y() - frame["y"]) / frame["scale_y"],
+        )
+        rotation_anchor = self._object_rotation_anchors[self.selected_index]
+        anchor_x = (rotation_anchor.x() - frame["x"]) / frame["scale_x"]
+        anchor_y = (rotation_anchor.y() - frame["y"]) / frame["scale_y"]
+        inverse_rotation = QTransform()
+        inverse_rotation.translate(anchor_x, anchor_y)
+        inverse_rotation.rotate(float(obj.get("rotation", 0.0)))
+        inverse_rotation.translate(-anchor_x, -anchor_y)
+        pointer = inverse_rotation.map(pointer)
+        pointer_x, pointer_y = pointer.x(), pointer.y()
         fixed_x = bounds.right() if sign_x < 0 else bounds.left()
         fixed_y = bounds.bottom() if sign_y < 0 else bounds.top()
         new_width = max(8.0, abs(pointer_x - fixed_x))
@@ -480,6 +690,9 @@ class Preview(QWidget):
         self._object_bounds = {}
         self._object_frame_bounds = {}
         self._object_positions = {}
+        self._object_rotation_anchors = {}
+        self._object_selection_corners = {}
+        self._object_alignment_centers = {}
         # Dibuja los objetos en coordenadas del lienzo y guarda sus límites
         # para hit-testing, selección y redimensionado.
         p.save()
@@ -506,6 +719,29 @@ class Preview(QWidget):
             x = position["x"] * frame_width
             y = position["y"] * frame_height
             scale = base_scale * float(obj.get("scale", 1.0))
+            rotation = float(obj.get("rotation", 0.0))
+            if kind == "text":
+                pivot_font = QFont(
+                    obj.get("font_family", "Sans Serif"),
+                    obj.get("font_size", 16),
+                    QFont.Weight(obj.get("font_weight", int(QFont.Weight.DemiBold))),
+                )
+                pivot_metrics = QFontMetricsF(pivot_font)
+                pivot_expression = obj.get("expression", "")
+                pivot_width = max(12.0, pivot_metrics.horizontalAdvance(pivot_expression))
+                pivot_height = max(12.0, pivot_metrics.height())
+                pivot_x, pivot_y = x + pivot_width / 2, y + pivot_height / 2
+            elif kind == "table":
+                pivot_metrics = QFontMetricsF(QFont("Sans Serif", 24))
+                pivot_expression = obj.get("expression", "")
+                pivot_width = max(48.0, pivot_metrics.horizontalAdvance(pivot_expression) + 20)
+                pivot_x, pivot_y = x + pivot_width / 2, y + 24
+            else:
+                pivot_x, pivot_y = x, y
+            p.save()
+            p.translate(pivot_x, pivot_y)
+            p.rotate(-rotation)
+            p.translate(-pivot_x, -pivot_y)
             if kind == "axes":
                 p.setPen(QPen(QColor(obj.get("color", "#8290a5")), 1))
                 p.drawLine(int(x - scale * 1.3), int(y), int(x + scale * 1.3), int(y))
@@ -594,15 +830,37 @@ class Preview(QWidget):
                 p.setFont(font)
                 p.drawText(x + 10, y + 32, expression)
             else:
+                p.restore()
                 continue
 
+            p.restore()
+            rotation_transform = QTransform()
+            rotation_transform.translate(pivot_x, pivot_y)
+            rotation_transform.rotate(-rotation)
+            rotation_transform.translate(-pivot_x, -pivot_y)
+            rotated_bounds = rotation_transform.mapRect(bounds)
             self._object_positions[index] = position
             self._object_frame_bounds[index] = bounds
+            frame_corners = (
+                bounds.topLeft(), bounds.topRight(),
+                bounds.bottomRight(), bounds.bottomLeft(),
+            )
+            rotated_corners = [rotation_transform.map(corner) for corner in frame_corners]
+            self._object_selection_corners[index] = [
+                QPointF(frame["x"] + corner.x() * frame["scale_x"],
+                        frame["y"] + corner.y() * frame["scale_y"])
+                for corner in rotated_corners
+            ]
+            self._object_alignment_centers[index] = rotation_transform.map(bounds.center())
+            self._object_rotation_anchors[index] = QPointF(
+                frame["x"] + pivot_x * frame["scale_x"],
+                frame["y"] + pivot_y * frame["scale_y"],
+            )
             self._object_bounds[index] = QRectF(
-                frame["x"] + bounds.x() * frame["scale_x"],
-                frame["y"] + bounds.y() * frame["scale_y"],
-                bounds.width() * frame["scale_x"],
-                bounds.height() * frame["scale_y"],
+                frame["x"] + rotated_bounds.x() * frame["scale_x"],
+                frame["y"] + rotated_bounds.y() * frame["scale_y"],
+                rotated_bounds.width() * frame["scale_x"],
+                rotated_bounds.height() * frame["scale_y"],
             )
 
         p.restore()
@@ -612,23 +870,27 @@ class Preview(QWidget):
             guide_pen = QPen(QColor("#ff5f87"), 1, Qt.PenStyle.DashLine)
             p.setPen(guide_pen)
             if "vertical" in self._active_guides:
-                center_x = frame_rect.center().x()
-                p.drawLine(int(center_x), int(frame_rect.top()),
-                           int(center_x), int(frame_rect.bottom()))
+                guide_x = frame["x"] + self._active_guides["vertical"] * frame["scale_x"]
+                p.drawLine(int(guide_x), int(frame_rect.top()),
+                           int(guide_x), int(frame_rect.bottom()))
             if "horizontal" in self._active_guides:
-                center_y = frame_rect.center().y()
-                p.drawLine(int(frame_rect.left()), int(center_y),
-                           int(frame_rect.right()), int(center_y))
+                guide_y = frame["y"] + self._active_guides["horizontal"] * frame["scale_y"]
+                p.drawLine(int(frame_rect.left()), int(guide_y),
+                           int(frame_rect.right()), int(guide_y))
             p.restore()
         p.setPen(QPen(QColor("#536174"), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(frame_rect)
         if self.selected_index in self._object_bounds:
-            selected_rect = self._object_bounds[self.selected_index]
+            selected_corners = self._object_selection_corners[self.selected_index]
             p.setPen(QPen(QColor("#65d6ff"), 1.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(selected_rect)
+            p.drawPolygon(QPolygonF(selected_corners))
+            top_mid, rotation_handle = self._rotation_handle_position(selected_corners)
+            p.drawLine(top_mid, rotation_handle)
+            p.setBrush(QColor("#65d6ff"))
+            p.drawEllipse(rotation_handle, 6, 6)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.setBrush(QColor("#e7ebf2"))
-            for corner in (selected_rect.topLeft(), selected_rect.topRight(),
-                           selected_rect.bottomRight(), selected_rect.bottomLeft()):
+            for corner in selected_corners:
                 p.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8))
