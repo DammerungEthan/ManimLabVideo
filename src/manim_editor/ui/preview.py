@@ -1,15 +1,187 @@
 """Widget de vista previa para escenas matemáticas."""
+import ast
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QFontMetricsF, QIcon, QPainter, QPen,
-    QPixmap, QPolygonF, QTransform,
+    QPainterPath, QPixmap, QPolygonF, QTransform,
 )
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter, QToolButton, QWidget,
+    QComboBox, QColorDialog, QDialog, QDialogButtonBox, QFormLayout, QLabel,
+    QLineEdit, QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter,
+    QToolButton, QVBoxLayout, QWidget,
 )
+
+
+class FunctionPlotPreview(QWidget):
+    """Muestra una gráfica matemática dentro del diálogo de inserción."""
+
+    FUNCTIONS = {
+        "sin": math.sin, "cos": math.cos, "tan": math.tan,
+        "asin": math.asin, "acos": math.acos, "atan": math.atan,
+        "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+        "sqrt": math.sqrt, "abs": abs, "exp": math.exp,
+        "log": math.log, "log10": math.log10,
+    }
+    CONSTANTS = {"pi": math.pi, "e": math.e, "tau": math.tau}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.expression = "sin(x)"
+        self.color = QColor("#65d6ff")
+        self.error = ""
+        self.setMinimumHeight(190)
+
+    def set_function(self, expression):
+        self.expression = expression.strip().replace("^", "**")
+        self.error = ""
+        try:
+            ast.parse(self.expression or "0", mode="eval")
+            valid_samples = 0
+            for sample in range(65):
+                try:
+                    self.evaluate(self.expression, -7 + 14 * sample / 64)
+                    valid_samples += 1
+                except (ValueError, TypeError, ZeroDivisionError, OverflowError):
+                    continue
+            if valid_samples == 0:
+                raise ValueError("No hay valores definidos en el intervalo visible")
+        except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError) as error:
+            self.error = str(error)
+        self.update()
+
+    @classmethod
+    def evaluate(cls, expression, x_value):
+        """Evalúa una expresión con x y operaciones matemáticas seguras."""
+        tree = ast.parse(expression or "0", mode="eval")
+
+        def visit(node):
+            if isinstance(node, ast.Expression):
+                return visit(node.body)
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+                return node.value
+            if isinstance(node, ast.Name):
+                if node.id == "x":
+                    return x_value
+                if node.id in cls.CONSTANTS:
+                    return cls.CONSTANTS[node.id]
+                raise ValueError(f"Nombre no permitido: {node.id}")
+            if isinstance(node, ast.BinOp):
+                left, right = visit(node.left), visit(node.right)
+                operations = {
+                    ast.Add: lambda: left + right,
+                    ast.Sub: lambda: left - right,
+                    ast.Mult: lambda: left * right,
+                    ast.Div: lambda: left / right,
+                    ast.FloorDiv: lambda: left // right,
+                    ast.Mod: lambda: left % right,
+                    ast.Pow: lambda: left ** right,
+                }
+                operation = operations.get(type(node.op))
+                if operation is None:
+                    raise ValueError("Operador no permitido")
+                if isinstance(node.op, ast.Pow) and abs(right) > 100:
+                    raise ValueError("El exponente debe estar entre -100 y 100")
+                return operation()
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                value = visit(node.operand)
+                return value if isinstance(node.op, ast.UAdd) else -value
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                function = cls.FUNCTIONS.get(node.func.id)
+                if function is None or node.keywords or len(node.args) not in (1, 2):
+                    raise ValueError("Usa funciones como sin(x), sqrt(x) o log(x, 2)")
+                arguments = [visit(argument) for argument in node.args]
+                return function(*arguments)
+            raise ValueError("Expresión no permitida")
+
+        value = float(visit(tree))
+        if not math.isfinite(value):
+            raise ValueError("La función no produce un valor finito")
+        return value
+
+    @classmethod
+    def sample_expression(cls, expression, start=-7.0, end=7.0, count=601):
+        points = []
+        for index in range(count):
+            x_value = start + (end - start) * index / (count - 1)
+            try:
+                y_value = cls.evaluate(expression, x_value)
+                if abs(y_value) > 1e4:
+                    points.append(None)
+                else:
+                    points.append((x_value, y_value))
+            except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
+                points.append(None)
+        return points
+
+    def sampled_points(self, start=-7.0, end=7.0, count=601):
+        return self.sample_expression(self.expression, start, end, count)
+
+    def set_color(self, color):
+        self.color = QColor(color)
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#101318"))
+        plot = QRectF(self.rect()).adjusted(32, 14, -14, -28)
+        painter.setPen(QPen(QColor("#303945"), 1))
+        for index in range(1, 8):
+            x = plot.left() + plot.width() * index / 8
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+        for index in range(1, 4):
+            y = plot.top() + plot.height() * index / 4
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+
+        # El área representa x=[-7,7], y=[-4,4], igual que los ejes de Manim.
+        zero_y = plot.top() + plot.height() / 2
+        zero_x = plot.left() + plot.width() / 2
+        painter.setPen(QPen(QColor("#738093"), 1.2))
+        painter.drawLine(QPointF(plot.left(), zero_y), QPointF(plot.right(), zero_y))
+        painter.drawLine(QPointF(zero_x, plot.top()), QPointF(zero_x, plot.bottom()))
+        for tick in range(-6, 7, 2):
+            tick_x = plot.left() + (tick + 7) * plot.width() / 14
+            painter.drawLine(QPointF(tick_x, zero_y - 3), QPointF(tick_x, zero_y + 3))
+        for tick in (-4, -2, 2, 4):
+            tick_y = zero_y - tick * plot.height() / 8
+            painter.drawLine(QPointF(zero_x - 3, tick_y), QPointF(zero_x + 3, tick_y))
+
+        path = QPainterPath()
+        started = False
+        previous_y = None
+        for point in self.sampled_points():
+            if point is None:
+                started = False
+                previous_y = None
+                continue
+            x_value, y_value = point
+            if abs(y_value) > 4 or (previous_y is not None and abs(y_value - previous_y) > 2.0):
+                started = False
+                previous_y = y_value
+                continue
+            point = QPointF(
+                plot.left() + (x_value + 7) * plot.width() / 14,
+                zero_y - y_value * plot.height() / 8,
+            )
+            if started:
+                path.lineTo(point)
+            else:
+                path.moveTo(point)
+                started = True
+            previous_y = y_value
+        painter.setPen(QPen(self.color, 2.5))
+        painter.drawPath(path)
+        painter.setPen(QColor("#c7ced8"))
+        painter.drawText(4, self.height() - 5, "−7")
+        painter.drawText(self.width() - 23, self.height() - 5, "7")
+        painter.drawText(5, 15, "y")
+        painter.drawText(self.width() - 14, int(zero_y) - 4, "x")
+        if self.error:
+            painter.setPen(QColor("#ff7b83"))
+            painter.drawText(plot.adjusted(8, 8, -8, -8), Qt.AlignmentFlag.AlignCenter,
+                             "Expresión inválida")
 
 
 class Preview(QWidget):
@@ -82,6 +254,17 @@ class Preview(QWidget):
         self.shape_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._add_shape_menu_actions()
 
+        self.function_button = QPushButton("ƒ", self)
+        self.function_button.setToolTip("Generar y previsualizar una función")
+        self.function_button.setAccessibleName("Generar función")
+        self.function_button.setFixedSize(36, 32)
+        self.function_button.setStyleSheet(
+            "QPushButton { background: #202735; color: #e7ebf2; "
+            "border: 1px solid #536174; border-radius: 5px; font-size: 18px; }"
+            "QPushButton:hover { background: #354052; }"
+        )
+        self.function_button.clicked.connect(self.open_function_generator)
+
         self.zoom_bar = QScrollBar(Qt.Orientation.Vertical, self)
         self.zoom_bar.setRange(50, 200)
         self.zoom_bar.setValue(self.zoom_level)
@@ -106,7 +289,7 @@ class Preview(QWidget):
     def _position_size_button(self):
         render_only = self.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
         for control in (
-            self.size_button, self.text_button, self.shape_button,
+            self.size_button, self.text_button, self.shape_button, self.function_button,
             self.zoom_bar, self.zoom_label,
         ):
             control.setVisible(not render_only)
@@ -121,6 +304,10 @@ class Preview(QWidget):
         self.shape_button.move(
             right - self.shape_button.width(),
             text_y + self.text_button.height() + 6,
+        )
+        self.function_button.move(
+            right - self.function_button.width(),
+            text_y + 2 * (self.text_button.height() + 6),
         )
         self.zoom_bar.move(
             self.width() - self.zoom_bar.width() - 8,
@@ -153,6 +340,7 @@ class Preview(QWidget):
         self._editing_enabled = bool(enabled)
         self.text_button.setEnabled(self._editing_enabled)
         self.shape_button.setEnabled(self._editing_enabled)
+        self.function_button.setEnabled(self._editing_enabled)
         if not self._editing_enabled:
             self.selected_index = None
             self._drag_mode = None
@@ -368,6 +556,114 @@ class Preview(QWidget):
                 lambda _checked=False, item=(label, kind, expression, color):
                     self.add_geometric_shape(*item)
             )
+
+    def open_function_generator(self):
+        """Permite elegir una función, revisar su gráfica e insertarla."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Generar función")
+        dialog.setMinimumWidth(380)
+        layout = QVBoxLayout(dialog)
+
+        form = QFormLayout()
+        function_input = QLineEdit("sin(x)", dialog)
+        function_input.setPlaceholderText("Ej.: sin(x) + x^2/5")
+        form.addRow("f(x) =", function_input)
+        layout.addLayout(form)
+
+        plot_preview = FunctionPlotPreview(dialog)
+        layout.addWidget(plot_preview)
+        function_input.textChanged.connect(plot_preview.set_function)
+        syntax_hint = QLabel(
+            "Usa x, pi, e y funciones como sin, cos, tan, sqrt, exp y log.", dialog
+        )
+        syntax_hint.setWordWrap(True)
+        syntax_hint.setStyleSheet("color: #aab4c2; font-size: 11px;")
+        layout.addWidget(syntax_hint)
+
+        color = QColor("#65d6ff")
+        color_button = QPushButton(dialog)
+
+        def update_color_button():
+            color_button.setText(color.name())
+            color_button.setStyleSheet(
+                f"background: {color.name()}; color: #111; padding: 5px;"
+            )
+            plot_preview.set_color(color)
+
+        def choose_color():
+            nonlocal color
+            selected = QColorDialog.getColor(color, dialog, "Color de la función")
+            if selected.isValid():
+                color = selected
+                update_color_button()
+
+        color_button.setText("Elegir color")
+        color_button.clicked.connect(choose_color)
+        update_color_button()
+        layout.addWidget(color_button)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog
+        )
+        insert_button = QPushButton("Insertar en previsualización", dialog)
+        buttons.addButton(insert_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        insert_button.clicked.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def validate_expression(expression):
+            normalized = expression.strip().replace("^", "**")
+            valid = bool(normalized) and len(normalized) <= 256
+            if valid:
+                try:
+                    ast.parse(normalized, mode="eval")
+                    valid_samples = 0
+                    for sample in range(33):
+                        x_value = -7 + 14 * sample / 32
+                        try:
+                            FunctionPlotPreview.evaluate(normalized, x_value)
+                            valid_samples += 1
+                        except (ValueError, TypeError, ZeroDivisionError, OverflowError):
+                            continue
+                    valid = valid_samples > 0
+                except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
+                    valid = False
+            plot_preview.set_function(normalized)
+            insert_button.setEnabled(valid)
+            if not valid:
+                syntax_hint.setText(
+                    "Revisa la expresión. Solo se permiten operaciones matemáticas y funciones conocidas."
+                )
+                syntax_hint.setStyleSheet("color: #ff7b83; font-size: 11px;")
+            else:
+                syntax_hint.setText(
+                    "Usa x, pi, e y funciones como sin, cos, tan, sqrt, exp y log."
+                )
+                syntax_hint.setStyleSheet("color: #aab4c2; font-size: 11px;")
+
+        function_input.textChanged.connect(validate_expression)
+        validate_expression(function_input.text())
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        expression = function_input.text().strip().replace("^", "**")
+        duration = max(0.1, float(self.state.get("duration", 10)))
+        start = min(duration, self.progress * duration)
+        self.state.setdefault("objects", []).append({
+            "name": expression,
+            "kind": "graph",
+            "expression": expression,
+            "color": color.name(),
+            "start": start,
+            "duration": max(0.1, duration - start),
+            "visible": True,
+            "track": self._track_for_new_object(),
+            "position": {"x": 0.5, "y": 0.5},
+            "scale": 1.0,
+        })
+        self.update()
+        self._update_related_views()
 
     @staticmethod
     def _shape_icon(kind, color):
@@ -790,23 +1086,46 @@ class Preview(QWidget):
                 bounds = QRectF(x - scale * 1.3, y - scale * 1.15,
                                 scale * 2.6, scale * 2.3)
             elif kind == "graph":
-                funcs = {
-                    "sin(x)": math.sin,
-                    "cos(x)": math.cos,
-                    "tan(x)": lambda value: math.sin(value) * .5,
-                    "x^2": lambda value: ((value - math.pi) ** 2 / 5) - 1,
-                }
-                expression = obj.get("expression", "sin(x)").strip().lower()
-                fn = funcs.get(expression, math.sin)
-                points = [
-                    (x - scale + 2 * scale * i / 219,
-                     y - scale * .48 * fn(i / 219 * math.tau * 1.5))
-                    for i in range(max(2, int(220 * self.progress)))
-                ]
-                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), 3))
-                for start, end in zip(points, points[1:]):
-                    p.drawLine(int(start[0]), int(start[1]), int(end[0]), int(end[1]))
-                bounds = QRectF(x - scale, y - scale * .5, scale * 2, scale)
+                unit = min(frame_width / 14.222, frame_height / 8) * float(obj.get("scale", 1.0))
+                left, right = x - 7 * unit, x + 7 * unit
+                top, bottom = y - 4 * unit, y + 4 * unit
+                p.setPen(QPen(QColor("#586273"), max(1.0, unit * 0.012)))
+                p.drawLine(QPointF(left, y), QPointF(right, y))
+                p.drawLine(QPointF(x, top), QPointF(x, bottom))
+                for tick in range(-6, 7, 2):
+                    p.drawLine(QPointF(x + tick * unit, y - 3),
+                               QPointF(x + tick * unit, y + 3))
+                for tick in (-4, -2, 2, 4):
+                    p.drawLine(QPointF(x - 3, y - tick * unit),
+                               QPointF(x + 3, y - tick * unit))
+
+                graph_path = QPainterPath()
+                started = False
+                previous_y = None
+                for point in FunctionPlotPreview.sample_expression(
+                    str(obj.get("expression", "sin(x)")).replace("^", "**")
+                ):
+                    if point is None:
+                        started = False
+                        previous_y = None
+                        continue
+                    x_value, y_value = point
+                    if abs(y_value) > 4 or (
+                        previous_y is not None and abs(y_value - previous_y) > 2.0
+                    ):
+                        started = False
+                        previous_y = y_value
+                        continue
+                    graph_point = QPointF(x + x_value * unit, y - y_value * unit)
+                    if started:
+                        graph_path.lineTo(graph_point)
+                    else:
+                        graph_path.moveTo(graph_point)
+                        started = True
+                    previous_y = y_value
+                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), max(2.0, unit * 0.035)))
+                p.drawPath(graph_path)
+                bounds = QRectF(left, top, right - left, bottom - top)
             elif kind == "text":
                 font = QFont(
                     obj.get("font_family", "Sans Serif"),

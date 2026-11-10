@@ -287,21 +287,16 @@ class MainWindow(QMainWindow):
             if kind == 'axes':
                 definition = f'{variable} = Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], tips=False).set_color({color}).move_to({location})'
             elif kind == 'graph':
-                graph_functions = {
-                    'sin(x)': 'np.sin(x)',
-                    'cos(x)': 'np.cos(x)',
-                    'tan(x)': 'np.sin(x) * 0.5',
-                    'x^2': '(x - np.pi) ** 2 / 5 - 1',
-                    'exp(x)': 'np.exp(x)',
-                    'log(x)': 'np.log(np.maximum(x, 0.001))',
-                }
-                graph_expression = graph_functions.get(expression.strip().lower())
-                if graph_expression:
+                try:
+                    graph_expression = self._function_expression_to_numpy(expression)
                     definition = (
-                        f'graph_axes_{index + 1} = Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], tips=False)\n'
+                        f'graph_axes_{index + 1} = Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], '
+                        f'x_length={scene_width:.6f}, y_length={scene_height:.6f}, tips=False)\n'
                         f'        {variable} = graph_axes_{index + 1}.plot(lambda x: {graph_expression}, '
                         f'x_range=[-7, 7], color={color}).move_to({location})'
                     )
+                except (SyntaxError, ValueError, TypeError):
+                    definition = None
             elif kind == 'text':
                 font = json.dumps(str(obj.get('font_family', 'Noto Serif')))
                 weight = 'BOLD' if int(obj.get('font_weight', 400)) >= 700 else 'NORMAL'
@@ -409,10 +404,16 @@ class MainWindow(QMainWindow):
                 self._code_render_timer.start(700)
                 self.code_status.setText('Cambios de la previsualización aplicados al código; preparando el render…')
                 self.code_status.setStyleSheet('color:#d8c27a')
+        elif not source and not self._code_view_dirty:
+            # La escena creada desde el lienzo también se refleja en el código
+            # aunque el proyecto aún no tenga una fuente Manim guardada.
+            self.refresh_code_view()
         self.update_views()
 
     def _sync_manim_source_from_preview(self, source, preview_objects):
         """Actualiza solo las asignaciones de Mobject reconocidas en construct()."""
+        if any(obj.get('kind') == 'graph' for obj in preview_objects):
+            source = self._ensure_numpy_import(source)
         try:
             tree=ast.parse(source)
             baseline,_duration=self._parse_manim_scene(source)
@@ -559,7 +560,21 @@ class MainWindow(QMainWindow):
         kind=obj.get('kind')
         color=json.dumps(str(obj.get('color','#65d6ff')))
         expression=str(obj.get('expression',''))
-        if kind=='text':
+        if kind=='graph':
+            try:
+                graph_expression=self._function_expression_to_numpy(expression)
+            except (SyntaxError,ValueError,TypeError):
+                return None
+            width=max(1,int(self.state.get('width',1920)))
+            height=max(1,int(self.state.get('height',1080)))
+            frame_width=14.222
+            frame_height=frame_width*height/width
+            base=(
+                'Axes(x_range=[-7, 7, 1], y_range=[-4, 4, 1], '
+                f'x_length={frame_width:.6f}, y_length={frame_height:.6f}, tips=False).plot(lambda x: {graph_expression}, '
+                f'x_range=[-7, 7], color={color})'
+            )
+        elif kind=='text':
             weight='BOLD' if int(obj.get('font_weight',400))>=700 else 'NORMAL'
             base=(
                 f'Text({json.dumps(expression,ensure_ascii=False)}, '
@@ -608,6 +623,83 @@ class MainWindow(QMainWindow):
         if abs(rotation)>0.1:
             result+=f'.rotate({rotation:.6f} * DEGREES)'
         return result
+
+    @staticmethod
+    def _function_expression_to_numpy(expression):
+        """Convierte una fórmula de f(x) en una expresión vectorizada para Manim."""
+        tree=ast.parse(str(expression).strip().replace('^','**'),mode='eval')
+        functions={
+            'sin','cos','tan','asin','acos','atan','sinh','cosh','tanh',
+            'sqrt','abs','exp','log','log10','floor','ceil','min','max',
+        }
+        constants={'pi':'np.pi','e':'np.e','tau':'(2 * np.pi)'}
+
+        class Translator(ast.NodeTransformer):
+            def visit_Name(self,node):
+                if node.id in constants:
+                    return ast.copy_location(ast.parse(constants[node.id],mode='eval').body,node)
+                if node.id in functions:
+                    numpy_name={'min':'minimum','max':'maximum'}.get(node.id,node.id)
+                    return ast.copy_location(
+                        ast.Attribute(value=ast.Name(id='np',ctx=ast.Load()),attr=numpy_name,ctx=ast.Load()),node
+                    )
+                if node.id!='x':
+                    raise ValueError(f'Nombre no permitido en la función: {node.id}')
+                return node
+
+            def visit_Call(self,node):
+                if not isinstance(node.func,ast.Name) or node.func.id not in functions:
+                    raise ValueError('Solo se permiten funciones matemáticas conocidas.')
+                expected={
+                    'min':2,'max':2,'log':(1,2),
+                }.get(node.func.id,1)
+                if isinstance(expected,tuple):
+                    if len(node.args) not in expected:
+                        raise ValueError('Número de argumentos incorrecto.')
+                elif len(node.args)!=expected:
+                    raise ValueError('Número de argumentos incorrecto.')
+                if node.keywords:
+                    raise ValueError('No se permiten argumentos con nombre.')
+                if node.func.id=='log' and len(node.args)==2:
+                    numerator=ast.Call(
+                        func=ast.Attribute(value=ast.Name(id='np',ctx=ast.Load()),attr='log',ctx=ast.Load()),
+                        args=[self.visit(node.args[0])],keywords=[],
+                    )
+                    denominator=ast.Call(
+                        func=ast.Attribute(value=ast.Name(id='np',ctx=ast.Load()),attr='log',ctx=ast.Load()),
+                        args=[self.visit(node.args[1])],keywords=[],
+                    )
+                    return ast.copy_location(ast.BinOp(left=numerator,op=ast.Div(),right=denominator),node)
+                return self.generic_visit(node)
+
+            def visit_Attribute(self,node):
+                raise ValueError('No se permiten atributos en la función.')
+
+        translated=Translator().visit(tree)
+        return ast.unparse(ast.fix_missing_locations(translated))
+
+    @staticmethod
+    def _ensure_numpy_import(source):
+        """Asegura el alias np que requieren las gráficas vectorizadas."""
+        try:
+            tree=ast.parse(source)
+        except SyntaxError:
+            return source
+        if any(
+            isinstance(node,ast.Import)
+            and any(alias.name=='numpy' and alias.asname=='np' for alias in node.names)
+            for node in tree.body
+        ):
+            return source
+        insertion_line=0
+        if tree.body and isinstance(tree.body[0],ast.Expr) and isinstance(tree.body[0].value,ast.Constant) and isinstance(tree.body[0].value.value,str):
+            insertion_line=tree.body[0].end_lineno
+        future_lines=[node.end_lineno for node in tree.body if isinstance(node,ast.ImportFrom) and node.module=='__future__']
+        if future_lines:
+            insertion_line=max(insertion_line,max(future_lines))
+        lines=source.splitlines(keepends=True)
+        lines.insert(insertion_line,'import numpy as np\n')
+        return ''.join(lines)
 
     def _insert_preview_object(self,source,variable,expression,start,duration):
         """Inserta el objeto en construct() cerca del instante elegido en la línea de tiempo."""
@@ -743,23 +835,7 @@ class MainWindow(QMainWindow):
         elif call_name=='plot':
             kind='graph'
             if args and isinstance(args[0], ast.Lambda):
-                body=args[0].body
-                if isinstance(body, ast.Call):
-                    function=self._manim_call_name(body)
-                    expression={'sin':'sin(x)','cos':'cos(x)','tan':'tan(x)','exp':'exp(x)','log':'log(x)'}.get(function,'sin(x)')
-                else:
-                    calls={self._manim_call_name(item) for item in ast.walk(body) if isinstance(item,ast.Call)}
-                    has_square=any(
-                        isinstance(item,ast.BinOp) and isinstance(item.op,ast.Pow)
-                        and self._code_literal(item.right)==2
-                        for item in ast.walk(body)
-                    )
-                    if has_square:
-                        expression='x^2'
-                    elif 'sin' in calls and any(isinstance(item,ast.BinOp) and isinstance(item.op,ast.Mult) for item in ast.walk(body)):
-                        expression='tan(x)'
-                    else:
-                        expression='sin(x)'
+                expression=self._numpy_expression_to_function(args[0].body)
         else:
             kind={
                 'Dot':'point','Arrow':'arrow','Line':'line','Circle':'circle',
@@ -838,6 +914,32 @@ class MainWindow(QMainWindow):
                 'y':center['y']-metrics.height()/(2*frame_height),
             }
         return obj
+
+    @staticmethod
+    def _numpy_expression_to_function(node):
+        """Recupera la sintaxis f(x) desde el cuerpo de una lambda generada."""
+        class Translator(ast.NodeTransformer):
+            numpy_names={'minimum':'min','maximum':'max'}
+
+            def visit_Attribute(self,attribute):
+                if isinstance(attribute.value,ast.Name) and attribute.value.id in {'np','numpy'}:
+                    name=self.numpy_names.get(attribute.attr,attribute.attr)
+                    if name=='pi':
+                        return ast.copy_location(ast.Name(id='pi',ctx=ast.Load()),attribute)
+                    if name=='e':
+                        return ast.copy_location(ast.Name(id='e',ctx=ast.Load()),attribute)
+                    if name in {
+                        'sin','cos','tan','asin','acos','atan','sinh','cosh','tanh',
+                        'sqrt','abs','exp','log','log10','floor','ceil','min','max',
+                    }:
+                        return ast.copy_location(ast.Name(id=name,ctx=ast.Load()),attribute)
+                return self.generic_visit(attribute)
+
+        translated=Translator().visit(node)
+        try:
+            return ast.unparse(ast.fix_missing_locations(translated))
+        except (TypeError,ValueError):
+            return 'sin(x)'
 
     # Convierte asignaciones y animaciones reconocidas en objetos del timeline.
     def _parse_manim_scene(self, source):
