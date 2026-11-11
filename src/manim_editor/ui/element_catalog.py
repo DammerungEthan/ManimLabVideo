@@ -14,7 +14,7 @@ class ElementPreset:
         """Agrupa el catálogo para que insertar elementos sea rápido."""
         if self.kind == "graph":
             return "Gráficas"
-        if self.kind == "text":
+        if self.kind in {"text", "equation"}:
             return "Texto y fórmulas"
         if self.kind in {"axes", "number_plane", "table"}:
             return "Herramientas matemáticas"
@@ -36,7 +36,7 @@ ELEMENTS = [
     ElementPreset("Raíz de valor absoluto", "graph", "sqrt(abs(x))"),
     ElementPreset("Valor absoluto", "graph", "abs(x)"),
     ElementPreset("Texto", "text", "Escribe aquí", "#f1f4fa"),
-    ElementPreset("Ecuación", "text", r"x^2 + y^2 = r^2", "#f1f4fa"),
+    ElementPreset("Ecuación", "equation", r"x^2 + y^2 = r^2", "#f1f4fa"),
     ElementPreset("Título", "text", "Título de la escena", "#f1f4fa"),
     ElementPreset("Etiqueta", "text", "Etiqueta", "#f1f4fa"),
     ElementPreset("Punto", "point", "A", "#ffbd69"),

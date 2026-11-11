@@ -2,16 +2,18 @@
 import ast
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QFontMetricsF, QIcon, QPainter, QPen,
     QPainterPath, QPixmap, QPolygonF, QTransform,
 )
 from PySide6.QtWidgets import (
     QComboBox, QColorDialog, QDialog, QDialogButtonBox, QFormLayout, QLabel,
-    QLineEdit, QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter,
+    QCheckBox, QLineEdit, QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter,
     QToolButton, QVBoxLayout, QWidget,
 )
+from manim_editor.ui.math_text import EquationPreview, format_math_expression
+from manim_editor.typography import MANIM_MATH_FONT, MANIM_TEXT_FONT
 
 
 class FunctionPlotPreview(QWidget):
@@ -30,7 +32,15 @@ class FunctionPlotPreview(QWidget):
         super().__init__(parent)
         self.expression = "sin(x)"
         self.color = QColor("#65d6ff")
+        self.axes_visible = True
         self.error = ""
+        self.show_grid = True
+        self.show_axes = True
+        self.animation_type = "Create"
+        self.animation_progress = 1.0
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setInterval(30)
+        self._animation_timer.timeout.connect(self._advance_animation_preview)
         self.setMinimumHeight(190)
 
     def set_function(self, expression):
@@ -122,36 +132,72 @@ class FunctionPlotPreview(QWidget):
         self.color = QColor(color)
         self.update()
 
+    def set_grid_visible(self, visible):
+        self.show_grid = bool(visible)
+        self.update()
+
+    def set_axes_visible(self, visible):
+        self.show_axes = bool(visible)
+        self.update()
+
+    def set_animation_type(self, animation_type):
+        self.animation_type = str(animation_type)
+        self.animation_progress = 0.0 if self.animation_type != "None" else 1.0
+        if self.animation_type == "None":
+            self._animation_timer.stop()
+        else:
+            self._animation_timer.start()
+        self.update()
+
+    def _advance_animation_preview(self):
+        self.animation_progress += 0.03
+        if self.animation_progress > 1.0:
+            self.animation_progress = 0.0
+        self.update()
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#101318"))
         plot = QRectF(self.rect()).adjusted(32, 14, -14, -28)
-        painter.setPen(QPen(QColor("#303945"), 1))
-        for index in range(1, 8):
-            x = plot.left() + plot.width() * index / 8
-            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
-        for index in range(1, 4):
-            y = plot.top() + plot.height() * index / 4
-            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-
-        # El área representa x=[-7,7], y=[-4,4], igual que los ejes de Manim.
         zero_y = plot.top() + plot.height() / 2
         zero_x = plot.left() + plot.width() / 2
-        painter.setPen(QPen(QColor("#738093"), 1.2))
-        painter.drawLine(QPointF(plot.left(), zero_y), QPointF(plot.right(), zero_y))
-        painter.drawLine(QPointF(zero_x, plot.top()), QPointF(zero_x, plot.bottom()))
-        for tick in range(-6, 7, 2):
-            tick_x = plot.left() + (tick + 7) * plot.width() / 14
-            painter.drawLine(QPointF(tick_x, zero_y - 3), QPointF(tick_x, zero_y + 3))
-        for tick in (-4, -2, 2, 4):
-            tick_y = zero_y - tick * plot.height() / 8
-            painter.drawLine(QPointF(zero_x - 3, tick_y), QPointF(zero_x + 3, tick_y))
+        if self.show_grid:
+            painter.setPen(QPen(QColor("#303945"), 1))
+            for tick in range(-6, 7, 2):
+                x = plot.left() + (tick + 7) * plot.width() / 14
+                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+            for tick in range(-4, 5, 2):
+                y = zero_y - tick * plot.height() / 8
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+
+        # El área representa x=[-7,7], y=[-4,4], igual que los ejes de Manim.
+        if self.show_axes:
+            painter.setPen(QPen(QColor("#738093"), 1.2))
+            painter.drawLine(QPointF(plot.left(), zero_y), QPointF(plot.right(), zero_y))
+            painter.drawLine(QPointF(zero_x, plot.top()), QPointF(zero_x, plot.bottom()))
+            for tick in range(-6, 7, 2):
+                tick_x = plot.left() + (tick + 7) * plot.width() / 14
+                painter.drawLine(QPointF(tick_x, zero_y - 3), QPointF(tick_x, zero_y + 3))
+            for tick in (-4, -2, 2, 4):
+                tick_y = zero_y - tick * plot.height() / 8
+                painter.drawLine(QPointF(zero_x - 3, tick_y), QPointF(zero_x + 3, tick_y))
 
         path = QPainterPath()
         started = False
         previous_y = None
-        for point in self.sampled_points():
+        samples = self.sampled_points()
+        progress = self.animation_progress
+        if self.animation_type in {"Create", "Write"}:
+            samples = samples[:max(1, int(len(samples) * progress))]
+        painter.save()
+        if self.animation_type == "FadeIn":
+            painter.setOpacity(progress)
+        elif self.animation_type == "GrowFromCenter":
+            painter.translate(zero_x, zero_y)
+            painter.scale(progress, progress)
+            painter.translate(-zero_x, -zero_y)
+        for point in samples:
             if point is None:
                 started = False
                 previous_y = None
@@ -173,11 +219,13 @@ class FunctionPlotPreview(QWidget):
             previous_y = y_value
         painter.setPen(QPen(self.color, 2.5))
         painter.drawPath(path)
-        painter.setPen(QColor("#c7ced8"))
-        painter.drawText(4, self.height() - 5, "−7")
-        painter.drawText(self.width() - 23, self.height() - 5, "7")
-        painter.drawText(5, 15, "y")
-        painter.drawText(self.width() - 14, int(zero_y) - 4, "x")
+        painter.restore()
+        if self.show_axes:
+            painter.setPen(QColor("#c7ced8"))
+            painter.drawText(4, self.height() - 5, "−7")
+            painter.drawText(self.width() - 23, self.height() - 5, "7")
+            painter.drawText(5, 15, "y")
+            painter.drawText(self.width() - 14, int(zero_y) - 4, "x")
         if self.error:
             painter.setPen(QColor("#ff7b83"))
             painter.drawText(plot.adjusted(8, 8, -8, -8), Qt.AlignmentFlag.AlignCenter,
@@ -197,7 +245,6 @@ class Preview(QWidget):
         self._original_splitter_sizes = None
         self._hidden_app_widgets = []
         self.selected_index = None
-        self.on_selection_changed = lambda index: None
         self._object_bounds = {}
         self._object_frame_bounds = {}
         self._object_positions = {}
@@ -209,11 +256,13 @@ class Preview(QWidget):
         self._drag_position = None
         self._drag_bounds = None
         self._drag_scale = 1.0
-        self._drag_font_size = 16
+        self._drag_font_size = 48
         self._drag_rotation = 0.0
         self._rotation_origin_angle = 0.0
         self._resize_corner = None
         self._active_guides = {}
+        self._rendered_frame = QPixmap()
+        self._editing_enabled = True
         self.zoom_level = 100
 
         self.size_button = QPushButton("⛶", self)
@@ -264,6 +313,17 @@ class Preview(QWidget):
         )
         self.function_button.clicked.connect(self.open_function_generator)
 
+        self.equation_button = QPushButton("∑", self)
+        self.equation_button.setToolTip("Agregar una ecuación matemática")
+        self.equation_button.setAccessibleName("Agregar ecuación")
+        self.equation_button.setFixedSize(36, 32)
+        self.equation_button.setStyleSheet(
+            "QPushButton { background: #202735; color: #e7ebf2; "
+            "border: 1px solid #536174; border-radius: 5px; font-size: 18px; }"
+            "QPushButton:hover { background: #354052; }"
+        )
+        self.equation_button.clicked.connect(self.open_equation_generator)
+
         self.zoom_bar = QScrollBar(Qt.Orientation.Vertical, self)
         self.zoom_bar.setRange(50, 200)
         self.zoom_bar.setValue(self.zoom_level)
@@ -288,7 +348,8 @@ class Preview(QWidget):
     def _position_size_button(self):
         render_only = self.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
         for control in (
-            self.size_button, self.text_button, self.shape_button, self.function_button,
+            self.size_button, self.text_button, self.shape_button,
+            self.function_button, self.equation_button,
             self.zoom_bar, self.zoom_label,
         ):
             control.setVisible(not render_only)
@@ -308,6 +369,10 @@ class Preview(QWidget):
             right - self.function_button.width(),
             text_y + 2 * (self.text_button.height() + 6),
         )
+        self.equation_button.move(
+            right - self.equation_button.width(),
+            text_y + 3 * (self.text_button.height() + 6),
+        )
         self.zoom_bar.move(
             self.width() - self.zoom_bar.width() - 8,
             self.height() - self.zoom_bar.height() - self.zoom_label.height() - 12,
@@ -321,6 +386,28 @@ class Preview(QWidget):
         self.zoom_level = value
         self.zoom_bar.setToolTip(f"Zoom de la vista previa: {value} %")
         self.zoom_label.setText(f"{value}%")
+        self.update()
+
+    def set_rendered_frame(self, frame):
+        """Muestra un fotograma del render real de Manim, si existe."""
+        self._rendered_frame = QPixmap(frame) if frame is not None else QPixmap()
+        self._object_bounds.clear()
+        self._object_frame_bounds.clear()
+        self._object_positions.clear()
+        self._object_rotation_anchors.clear()
+        self._object_selection_corners.clear()
+        self._object_alignment_centers.clear()
+        self.update()
+
+    def set_editing_enabled(self, enabled):
+        """Evita editar el fotograma anterior mientras el código está pendiente de render."""
+        self._editing_enabled = bool(enabled)
+        self.text_button.setEnabled(self._editing_enabled)
+        self.shape_button.setEnabled(self._editing_enabled)
+        self.function_button.setEnabled(self._editing_enabled)
+        if not self._editing_enabled:
+            self.selected_index = None
+            self._drag_mode = None
         self.update()
 
     def _preview_geometry(self):
@@ -440,12 +527,13 @@ class Preview(QWidget):
         font_family = QComboBox()
         font_families = sorted(QFontDatabase.families(), key=str.casefold)
         font_family.addItems(font_families)
-        if font_family.findText("Computer Modern", Qt.MatchFlag.MatchFixedString) < 0:
-            font_family.addItem("Computer Modern")
-        font_family.setCurrentText("Noto Serif")
+        for family in (MANIM_TEXT_FONT, "Computer Modern"):
+            if font_family.findText(family, Qt.MatchFlag.MatchFixedString) < 0:
+                font_family.addItem(family)
+        font_family.setCurrentText(MANIM_TEXT_FONT)
         font_size = QSpinBox()
         font_size.setRange(8, 300)
-        font_size.setValue(42)
+        font_size.setValue(48)
         font_weight = QComboBox()
         for label, weight in (
             ("Fino", QFont.Weight.Light),
@@ -545,11 +633,33 @@ class Preview(QWidget):
         function_input = QLineEdit("sin(x)", dialog)
         function_input.setPlaceholderText("Ej.: sin(x) + x^2/5")
         form.addRow("f(x) =", function_input)
+        show_grid = QCheckBox("Mostrar cuadrícula", dialog)
+        show_grid.setChecked(True)
+        show_axes = QCheckBox("Mostrar ejes", dialog)
+        show_axes.setChecked(True)
+        animation_choice = QComboBox(dialog)
+        for label, value in (
+            ("Dibujar (Create)", "Create"),
+            ("Aparecer (FadeIn)", "FadeIn"),
+            ("Escribir (Write)", "Write"),
+            ("Crecer desde el centro", "GrowFromCenter"),
+            ("Sin animación", "None"),
+        ):
+            animation_choice.addItem(label, value)
+        form.addRow("", show_grid)
+        form.addRow("", show_axes)
+        form.addRow("Animación", animation_choice)
         layout.addLayout(form)
 
         plot_preview = FunctionPlotPreview(dialog)
+        plot_preview.set_animation_type(animation_choice.currentData())
         layout.addWidget(plot_preview)
         function_input.textChanged.connect(plot_preview.set_function)
+        show_grid.toggled.connect(plot_preview.set_grid_visible)
+        show_axes.toggled.connect(plot_preview.set_axes_visible)
+        animation_choice.currentIndexChanged.connect(
+            lambda _index: plot_preview.set_animation_type(animation_choice.currentData())
+        )
         syntax_hint = QLabel(
             "Usa x, pi, e y funciones como sin, cos, tan, sqrt, exp y log.", dialog
         )
@@ -632,6 +742,10 @@ class Preview(QWidget):
             "kind": "graph",
             "expression": expression,
             "color": color.name(),
+            "show_grid": show_grid.isChecked(),
+            "show_axes": show_axes.isChecked(),
+            "animation": animation_choice.currentData(),
+            "animation_duration": 1.0,
             "start": start,
             "duration": max(0.1, duration - start),
             "visible": True,
@@ -639,6 +753,90 @@ class Preview(QWidget):
             "position": {"x": 0.5, "y": 0.5},
             "scale": 1.0,
         })
+        self.selected_index = len(self.state["objects"]) - 1
+        self.on_selection_changed(self.selected_index)
+        self.update()
+        self._update_related_views()
+
+    def open_equation_generator(self):
+        """Crea una ecuación con muestra tipográfica y selector de color."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Agregar ecuación")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        equation_input = QLineEdit(r"x^2 + y^2 = r^2", dialog)
+        equation_input.setMaxLength(256)
+        equation_input.setPlaceholderText(r"Ej.: \frac{x^2}{2} + \sqrt{y} = \pi")
+        form.addRow("Ecuación", equation_input)
+        layout.addLayout(form)
+
+        equation_preview = EquationPreview(dialog)
+        layout.addWidget(equation_preview)
+        equation_input.textChanged.connect(equation_preview.set_expression)
+        hint = QLabel(
+            r"Admite potencias, subíndices, \frac, \sqrt, letras griegas y símbolos comunes.",
+            dialog,
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aab4c2; font-size: 11px;")
+        layout.addWidget(hint)
+
+        color = QColor("#f1f4fa")
+        color_button = QPushButton(dialog)
+
+        def update_equation_color():
+            color_button.setText(color.name())
+            color_button.setStyleSheet(
+                f"background: {color.name()}; color: #111; padding: 5px;"
+            )
+            equation_preview.set_color(color)
+
+        def choose_equation_color():
+            nonlocal color
+            selected = QColorDialog.getColor(color, dialog, "Color de la ecuación")
+            if selected.isValid():
+                color = selected
+                update_equation_color()
+
+        color_button.setText("Elegir color")
+        color_button.clicked.connect(choose_equation_color)
+        update_equation_color()
+        layout.addWidget(color_button)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog
+        )
+        insert_button = QPushButton("Insertar en previsualización", dialog)
+        buttons.addButton(insert_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        insert_button.clicked.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        expression = equation_input.text().strip()
+        if not expression:
+            return
+
+        duration = max(0.1, float(self.state.get("duration", 10)))
+        start = min(duration, self.progress * duration)
+        self.state.setdefault("objects", []).append({
+            "name": expression[:24],
+            "kind": "equation",
+            "expression": expression,
+            "color": color.name(),
+            "start": start,
+            "duration": max(0.1, duration - start),
+            "visible": True,
+            "track": self._track_for_new_object(),
+            "position": {"x": 0.5, "y": 0.5},
+            "scale": 1.0,
+            "font_size": 48,
+            "font_family": MANIM_MATH_FONT,
+        })
+        self.selected_index = len(self.state["objects"]) - 1
+        self.on_selection_changed(self.selected_index)
         self.update()
         self._update_related_views()
 
@@ -772,9 +970,39 @@ class Preview(QWidget):
             handle = QPointF(handle.x(), 8)
         return top_mid, handle
 
+    @staticmethod
+    def _animation_effect(kind, progress, entering, frame_width, frame_height):
+        """Devuelve desplazamiento, escala, opacidad y giro para una transición."""
+        progress = max(0.0, min(1.0, progress))
+        remaining = 1.0 - progress
+        if kind == "fade":
+            return 0.0, 0.0, 1.0, progress if entering else remaining, 0.0
+        if kind.startswith("slide_"):
+            direction = kind.removeprefix("slide_")
+            distance = remaining if entering else progress
+            offsets = {
+                "left": (-frame_width * distance, 0.0),
+                "right": (frame_width * distance, 0.0),
+                "up": (0.0, -frame_height * distance),
+                "down": (0.0, frame_height * distance),
+            }
+            dx, dy = offsets[direction]
+            return dx, dy, 1.0, 1.0, 0.0
+        if kind == "scale":
+            factor = 0.15 + 0.85 * (progress if entering else remaining)
+            return 0.0, 0.0, factor, 1.0, 0.0
+        if kind == "rotate":
+            degrees = -360.0 * remaining if entering else 360.0 * progress
+            return 0.0, 0.0, 1.0, 1.0, degrees
+        return 0.0, 0.0, 1.0, 1.0, 0.0
+
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        if not self._editing_enabled:
+            event.accept()
+            return
+
         point = event.position()
         self._drag_mode = None
         self._resize_corner = None
@@ -814,12 +1042,10 @@ class Preview(QWidget):
             )
             if hit_index is None:
                 self.selected_index = None
-                self.on_selection_changed(None)
                 self.update()
                 event.accept()
                 return
             self.selected_index = hit_index
-            self.on_selection_changed(hit_index)
             self._drag_mode = "move"
 
         self._drag_origin = point
@@ -827,7 +1053,7 @@ class Preview(QWidget):
         self._drag_bounds = QRectF(self._object_frame_bounds[self.selected_index])
         obj = self.state["objects"][self.selected_index]
         self._drag_scale = float(obj.get("scale", 1.0))
-        self._drag_font_size = int(obj.get("font_size", 16))
+        self._drag_font_size = int(obj.get("font_size", 48))
         self._drag_rotation = float(obj.get("rotation", 0.0))
         if self._drag_mode == "rotate":
             anchor = self._object_rotation_anchors[self.selected_index]
@@ -980,7 +1206,7 @@ class Preview(QWidget):
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor("#151922"))
+        p.fillRect(self.rect(), QColor("#000000"))
         frame = self._preview_geometry()
         frame_rect = QRectF(frame["x"], frame["y"], frame["width"], frame["height"])
         viewport = frame["viewport"]
@@ -990,13 +1216,29 @@ class Preview(QWidget):
         self._object_rotation_anchors = {}
         self._object_selection_corners = {}
         self._object_alignment_centers = {}
+        rendered_frame = not self._rendered_frame.isNull()
+        if rendered_frame:
+            p.save()
+            p.setClipRect(viewport)
+            p.fillRect(frame_rect, QColor("#000000"))
+            p.drawPixmap(frame_rect, self._rendered_frame, QRectF(self._rendered_frame.rect()))
+            p.restore()
+            p.setPen(QPen(QColor("#536174"), 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(frame_rect)
         # Dibuja los objetos en coordenadas del lienzo y guarda sus límites
         # para hit-testing, selección y redimensionado.
         p.save()
         p.setClipRect(viewport)
-        p.fillRect(frame_rect, QColor("#101318"))
+        if not rendered_frame:
+            p.fillRect(frame_rect, QColor("#000000"))
         p.translate(frame["x"], frame["y"])
         p.scale(frame["scale_x"], frame["scale_y"])
+        if rendered_frame:
+            # El video ya contiene estos objetos; dibujamos solo su geometría
+            # de selección para permitir moverlos sin duplicarlos en pantalla.
+            p.setOpacity(0)
+
         frame_width = frame["frame_width"]
         frame_height = frame["frame_height"]
         now = self.progress * self.state.get("duration", 10)
@@ -1007,36 +1249,68 @@ class Preview(QWidget):
             position = self._position_for(obj, index, text_index, frame)
             if kind == "text":
                 text_index += 1
-            track_meta = self.state.get("track_meta", {}).get(obj.get("track", "Pista 1"), {})
-            if not obj.get("visible", True) or not track_meta.get("visible", True):
+            if not obj.get("visible", True):
                 continue
             if now < obj.get("start", 0) or now > obj.get("start", 0) + obj.get("duration", 0):
                 continue
 
+            # Calcula transiciones de entrada/salida sobre el tiempo local del clip.
+            clip_duration = max(0.03, float(obj.get("duration", 0)))
+            local_time = now - float(obj.get("start", 0))
+            enter_kind = obj.get("animation_in", "none")
+            exit_kind = obj.get("animation_out", "none")
+            enter_duration = min(clip_duration, max(0.05, float(obj.get("animation_in_duration", 0.5))))
+            exit_duration = min(clip_duration, max(0.05, float(obj.get("animation_out_duration", 0.5))))
+            enter_effect = (0.0, 0.0, 1.0, 1.0, 0.0)
+            exit_effect = (0.0, 0.0, 1.0, 1.0, 0.0)
+            if enter_kind != "none" and local_time < enter_duration:
+                enter_effect = self._animation_effect(
+                    enter_kind, local_time / enter_duration, True, frame_width, frame_height
+                )
+            remaining_time = clip_duration - local_time
+            if exit_kind != "none" and remaining_time < exit_duration:
+                exit_effect = self._animation_effect(
+                    exit_kind, 1.0 - remaining_time / exit_duration,
+                    False, frame_width, frame_height,
+                )
+            enter_dx, enter_dy, enter_scale, enter_opacity, enter_rotation = enter_effect
+            exit_dx, exit_dy, exit_scale, exit_opacity, exit_rotation = exit_effect
+
             x = position["x"] * frame_width
             y = position["y"] * frame_height
-            scale = base_scale * float(obj.get("scale", 1.0))
-            rotation = float(obj.get("rotation", 0.0))
-            if kind == "text":
-                pivot_font = QFont(
-                    obj.get("font_family", "Sans Serif"),
-                    round(obj.get("font_size", 16) * float(obj.get("scale", 1.0))),
-                    QFont.Weight(obj.get("font_weight", int(QFont.Weight.DemiBold))),
+            x += enter_dx + exit_dx
+            y += enter_dy + exit_dy
+            scale = base_scale * float(obj.get("scale", 1.0)) * enter_scale * exit_scale
+            rotation = float(obj.get("rotation", 0.0)) + enter_rotation + exit_rotation
+            if kind in {"text", "equation"}:
+                display_expression = (
+                    format_math_expression(obj.get("expression", ""))
+                    if kind == "equation" else obj.get("expression", "")
                 )
+                equation_font_weight = QFont.Weight.Normal
+                pivot_font = QFont(
+                    obj.get("font_family", MANIM_MATH_FONT if kind == "equation" else MANIM_TEXT_FONT),
+                    round(obj.get("font_size", 48) * float(obj.get("scale", 1.0))),
+                    QFont.Weight(obj.get("font_weight", int(equation_font_weight))),
+                )
+                if kind == "equation":
+                    pivot_font.setStyle(QFont.Style.StyleItalic)
                 pivot_metrics = QFontMetricsF(pivot_font)
-                pivot_expression = obj.get("expression", "")
+                pivot_expression = display_expression
                 pivot_width = max(12.0, pivot_metrics.horizontalAdvance(pivot_expression))
                 pivot_height = max(12.0, pivot_metrics.height())
+                if kind == "equation":
+                    x -= pivot_width / 2
+                    y -= pivot_height / 2
                 pivot_x, pivot_y = x + pivot_width / 2, y + pivot_height / 2
             elif kind == "table":
-                pivot_metrics = QFontMetricsF(QFont("Sans Serif", 24))
+                pivot_metrics = QFontMetricsF(QFont(MANIM_TEXT_FONT, 24))
                 pivot_expression = obj.get("expression", "")
                 pivot_width = max(48.0, pivot_metrics.horizontalAdvance(pivot_expression) + 20)
                 pivot_x, pivot_y = x + pivot_width / 2, y + 24
             else:
                 pivot_x, pivot_y = x, y
             p.save()
-            p.setOpacity(float(obj.get("opacity", 1.0)))
             p.translate(pivot_x, pivot_y)
             p.rotate(-rotation)
             p.translate(-pivot_x, -pivot_y)
@@ -1050,23 +1324,46 @@ class Preview(QWidget):
                 unit = min(frame_width / 14.222, frame_height / 8) * float(obj.get("scale", 1.0))
                 left, right = x - 7 * unit, x + 7 * unit
                 top, bottom = y - 4 * unit, y + 4 * unit
-                p.setPen(QPen(QColor("#586273"), max(1.0, unit * 0.012)))
-                p.drawLine(QPointF(left, y), QPointF(right, y))
-                p.drawLine(QPointF(x, top), QPointF(x, bottom))
-                for tick in range(-6, 7, 2):
-                    p.drawLine(QPointF(x + tick * unit, y - 3),
-                               QPointF(x + tick * unit, y + 3))
-                for tick in (-4, -2, 2, 4):
-                    p.drawLine(QPointF(x - 3, y - tick * unit),
-                               QPointF(x + 3, y - tick * unit))
+                animation = obj.get("animation", "None")
+                animation_duration = max(0.01, float(obj.get("animation_duration", 1.0)))
+                animation_progress = min(1.0, max(0.0, (now - float(obj.get("start", 0))) / animation_duration))
+                if animation == "None" or now >= float(obj.get("start", 0)) + animation_duration:
+                    animation_progress = 1.0
+                p.save()
+                if animation == "FadeIn":
+                    p.setOpacity(animation_progress)
+                elif animation == "GrowFromCenter":
+                    p.translate(x, y)
+                    p.scale(animation_progress, animation_progress)
+                    p.translate(-x, -y)
+                if obj.get("show_grid", True):
+                    p.setPen(QPen(QColor("#303945"), max(1.0, unit * 0.008)))
+                    for tick in range(-6, 8, 2):
+                        p.drawLine(QPointF(x + tick * unit, top),
+                                   QPointF(x + tick * unit, bottom))
+                    for tick in range(-4, 5, 2):
+                        p.drawLine(QPointF(left, y - tick * unit),
+                                   QPointF(right, y - tick * unit))
+                if obj.get("show_axes", True):
+                    p.setPen(QPen(QColor("#586273"), max(1.0, unit * 0.012)))
+                    p.drawLine(QPointF(left, y), QPointF(right, y))
+                    p.drawLine(QPointF(x, top), QPointF(x, bottom))
+                    for tick in range(-6, 7, 2):
+                        p.drawLine(QPointF(x + tick * unit, y - 3),
+                                   QPointF(x + tick * unit, y + 3))
+                    for tick in (-4, -2, 2, 4):
+                        p.drawLine(QPointF(x - 3, y - tick * unit),
+                                   QPointF(x + 3, y - tick * unit))
 
                 graph_path = QPainterPath()
                 started = False
                 previous_y = None
-                for point in FunctionPlotPreview.sample_expression(
-                    str(obj.get("expression", "sin(x)")).replace("^", "**"),
-                    float(obj.get("x_min", -7)), float(obj.get("x_max", 7)),
-                ):
+                graph_points = FunctionPlotPreview.sample_expression(
+                    str(obj.get("expression", "sin(x)")).replace("^", "**")
+                )
+                if animation in {"Create", "Write"}:
+                    graph_points = graph_points[:max(1, round(len(graph_points) * animation_progress))]
+                for point in graph_points:
                     if point is None:
                         started = False
                         previous_y = None
@@ -1085,18 +1382,24 @@ class Preview(QWidget):
                         graph_path.moveTo(graph_point)
                         started = True
                     previous_y = y_value
-                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")),
-                              max(1.0, float(obj.get("stroke_width", 3)))))
+                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), max(2.0, unit * 0.035)))
                 p.drawPath(graph_path)
+                p.restore()
                 bounds = QRectF(left, top, right - left, bottom - top)
-            elif kind == "text":
+            elif kind in {"text", "equation"}:
+                is_equation = kind == "equation"
                 font = QFont(
-                    obj.get("font_family", "Sans Serif"),
-                    round(obj.get("font_size", 16) * float(obj.get("scale", 1.0))),
-                    QFont.Weight(obj.get("font_weight", int(QFont.Weight.DemiBold))),
+                    obj.get("font_family", MANIM_MATH_FONT if is_equation else MANIM_TEXT_FONT),
+                    round(obj.get("font_size", 48) * float(obj.get("scale", 1.0))),
+                    QFont.Weight(obj.get("font_weight", int(QFont.Weight.Normal))),
                 )
+                if is_equation:
+                    font.setStyle(QFont.Style.StyleItalic)
                 metrics = QFontMetricsF(font)
-                expression = obj.get("expression", "")
+                expression = (
+                    format_math_expression(obj.get("expression", ""))
+                    if is_equation else obj.get("expression", "")
+                )
                 p.setPen(QColor(obj.get("color", "#f1f4fa")))
                 p.setFont(font)
                 p.drawText(x, y + metrics.ascent(), expression)
@@ -1113,13 +1416,13 @@ class Preview(QWidget):
                 radius_x = scale * .45
                 radius_y = radius_x if kind == "circle" else radius_x * .58
                 bounds = QRectF(x - radius_x, y - radius_y, radius_x * 2, radius_y * 2)
-                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), float(obj.get("stroke_width", 3))))
+                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), 3))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(bounds)
             elif kind in {"line", "vector", "arrow"}:
                 half_width = scale * .6
                 color = QColor(obj.get("color", "#65d6ff"))
-                p.setPen(QPen(color, float(obj.get("stroke_width", 3))))
+                p.setPen(QPen(color, 3))
                 p.drawLine(int(x - half_width), int(y), int(x + half_width), int(y))
                 if kind in {"vector", "arrow"}:
                     head = max(8.0, scale * .10)
@@ -1136,7 +1439,7 @@ class Preview(QWidget):
                     (x + half_width, y + half_height),
                 )
                 color = QColor(obj.get("color", "#65d6ff"))
-                p.setPen(QPen(color, float(obj.get("stroke_width", 3))))
+                p.setPen(QPen(color, 3))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 for start, end in zip(points, points[1:] + points[:1]):
                     p.drawLine(int(start[0]), int(start[1]), int(end[0]), int(end[1]))
@@ -1144,7 +1447,7 @@ class Preview(QWidget):
                                 half_width * 2, half_height * 2)
             elif kind == "table":
                 expression = obj.get("expression", "")
-                font = QFont("Sans Serif", 24)
+                font = QFont(MANIM_TEXT_FONT, 24)
                 metrics = QFontMetricsF(font)
                 bounds = QRectF(x, y, max(48.0, metrics.horizontalAdvance(expression) + 20), 48)
                 p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), 2))
@@ -1152,35 +1455,6 @@ class Preview(QWidget):
                 p.drawRect(bounds)
                 p.setFont(font)
                 p.drawText(x + 10, y + 32, expression)
-            elif kind in {"square", "rectangle"}:
-                width = scale * (0.9 if kind == "square" else 1.25)
-                height = scale * (0.9 if kind == "square" else 0.7)
-                bounds = QRectF(x - width / 2, y - height / 2, width, height)
-                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), float(obj.get("stroke_width", 3))))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRect(bounds)
-            elif kind == "number_plane":
-                unit = max(8.0, scale * 0.32)
-                bounds = QRectF(x - unit * 5, y - unit * 3, unit * 10, unit * 6)
-                p.setPen(QPen(QColor(obj.get("color", "#8290a5")), 1))
-                for column in range(11):
-                    px = bounds.left() + column * unit
-                    p.drawLine(QPointF(px, bounds.top()), QPointF(px, bounds.bottom()))
-                for row in range(7):
-                    py = bounds.top() + row * unit
-                    p.drawLine(QPointF(bounds.left(), py), QPointF(bounds.right(), py))
-                p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), float(obj.get("stroke_width", 3))))
-                p.drawLine(QPointF(x, bounds.top()), QPointF(x, bounds.bottom()))
-                p.drawLine(QPointF(bounds.left(), y), QPointF(bounds.right(), y))
-            elif kind in {"image", "group"}:
-                width, height = scale * 1.2, scale * 0.8
-                bounds = QRectF(x - width / 2, y - height / 2, width, height)
-                p.setPen(QPen(QColor(obj.get("color", "#8290a5")), float(obj.get("stroke_width", 3))))
-                p.setBrush(QColor("#202735"))
-                p.drawRoundedRect(bounds, 8, 8)
-                p.setPen(QColor(obj.get("color", "#f1f4fa")))
-                p.drawText(bounds, Qt.AlignmentFlag.AlignCenter,
-                           obj.get("expression") or ("Imagen" if kind == "image" else "Grupo"))
             else:
                 p.restore()
                 continue

@@ -2,7 +2,7 @@
 
 Editor de escritorio multiplataforma para crear y editar animaciones con Manim, con una experiencia basada en línea de tiempo y previsualización.
 
-> Estado: editor gráfico en desarrollo. Los elementos se crean desde un catálogo, se seleccionan en el preview o el timeline y se ajustan en el inspector lateral. El proyecto ofrece pistas editables, reproducción y formatos YouTube (16:9) y Reels/Shorts (9:16). El preview dibuja una representación vectorial; la exportación/renderizado final con el motor Manim sigue pendiente.
+> Estado: editor gráfico en desarrollo. Los elementos se crean desde un catálogo, se seleccionan en el preview o el timeline y se ajustan en el inspector lateral, incluidas transiciones de entrada y salida. El proyecto ofrece pistas editables, reproducción y formatos YouTube (16:9) y Reels/Shorts (9:16). El preview dibuja una representación vectorial; la exportación/renderizado final con el motor Manim sigue pendiente.
 
 ## Requisitos
 
@@ -48,12 +48,14 @@ La interfaz está construida con PySide6. Por ahora, la edición se hace desde c
 ```text
 src/manim_editor/
 ├── app.py                 # Punto de entrada del comando manim-editor
+├── typography.py          # Familias tipográficas predeterminadas de Manim
 ├── models/                # Estado inicial y normalización de proyectos
 ├── services/              # Persistencia y servicios del proyecto
 ├── ui/
 │   ├── main_window.py     # Composición de la ventana y coordinación del estado
 │   ├── element_catalog.py # Catálogo de elementos insertables
 │   ├── inspector.py       # Propiedades editables del clip seleccionado
+│   ├── math_text.py       # Formato matemático y preview de ecuaciones
 │   ├── preview.py         # Dibujo e interacción con los elementos
 │   ├── timeline.py        # Pistas, clips, selección y cabezal de reproducción
 │   └── video_export.py    # Exportación del preview con ffmpeg
