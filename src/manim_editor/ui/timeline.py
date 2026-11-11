@@ -9,10 +9,11 @@ class Timeline(QWidget):
 
     EDGE = 7
 
-    def __init__(self, state, on_seek, on_change=None):
+    def __init__(self, state, on_seek, on_change=None, on_select=None):
         super().__init__()
         self.state, self.on_seek = state, on_seek
         self.on_change = on_change or (lambda: None)
+        self.on_select = on_select or (lambda _index: None)
         self.scroll_offset = 0
         self.visible_seconds = 20
         self.row_offset = 0
@@ -21,6 +22,7 @@ class Timeline(QWidget):
         self.selected_track = None
         self.position = 38
         self._drag_index = None
+        self._selected_index = None
         self._drag_mode = None
         self._offset = 0
         self._fixed_end = 0
@@ -103,10 +105,14 @@ class Timeline(QWidget):
                 p.setPen(QPen(QColor("#f0b72f"),2)); p.drawLine(0,int(y),0,int(y+32))
             p.setPen(QColor("#c7d0dd")); p.drawText(12,int(y+18),track[:14])
             p.setPen(QColor("#93a0b2")); p.drawText(100,int(y+18),"◉" if meta.get("visible",True) else "○")
-            for obj in self.state["objects"]:
+            for object_index, obj in enumerate(self.state["objects"]):
                 if obj.get("track", "Pista 1") != track: continue
                 x,clip_y,w,h=self._clip_rect(track_index,obj)
-                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(obj["color"])); p.drawRoundedRect(int(x),int(clip_y),int(w),h,5,5)
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(obj.get("clip_color", obj["color"]))); p.drawRoundedRect(int(x),int(clip_y),int(w),h,5,5)
+                if not obj.get("visible", True): p.fillRect(int(x),int(clip_y),int(w),h,QColor(15,17,21,150))
+                if object_index == self._selected_index:
+                    p.setPen(QPen(QColor("#ffffff"), 2)); p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRoundedRect(int(x),int(clip_y),int(w),h,5,5)
                 if not meta.get("visible",True): p.fillRect(int(x),int(clip_y),int(w),h,QColor(17,19,23,150))
                 p.setPen(QColor("#ffffff")); p.drawText(int(x+6),int(clip_y+17),obj["name"][:12])
                 p.setPen(QPen(QColor("#ffffff"),2)); p.drawLine(int(x+4),int(clip_y+5),int(x+4),int(clip_y+19)); p.drawLine(int(x+w-4),int(clip_y+5),int(x+w-4),int(clip_y+19))
@@ -140,14 +146,17 @@ class Timeline(QWidget):
                 meta=self.state.setdefault("track_meta",{}).setdefault(track,{"visible":True}); meta["visible"]=not meta.get("visible",True)
             else: self.selected_track=track
             self.update(); self.on_change(); return
-        left,_,width,scale=self._geometry()
-        playhead_x=left+width*(self.position-self.scroll_offset)/scale
-        if abs(event.position().x()-playhead_x) <= 8:
-            self._drag_mode="playhead"; self._seek_at(event.position().x()); return
         i,mode,offset=self._hit(event.position().x(),event.position().y())
-        if i is None:self._seek_at(event.position().x()); return
+        if i is None:
+            left,_,width,scale=self._geometry()
+            playhead_x=left+width*(self.position-self.scroll_offset)/scale
+            if abs(event.position().x()-playhead_x) <= 8:
+                self._drag_mode="playhead"; self._seek_at(event.position().x()); return
+            self._seek_at(event.position().x()); return
         self._drag_index,self._drag_mode,self._offset=i,mode,offset
         self._selected_index=i
+        self.on_select(i)
+        self.update()
         obj=self.state["objects"][i]; self._fixed_end=obj["start"]+obj["duration"]
 
     def mouseDoubleClickEvent(self, event):
@@ -202,6 +211,9 @@ class Timeline(QWidget):
     def leaveEvent(self,event): self.unsetCursor()
     def set_scroll_offset(self, value):
         self.scroll_offset=max(0,value); self.update()
+    def set_selected_index(self, index):
+        self._selected_index = index if isinstance(index, int) and 0 <= index < len(self.state.get("objects", [])) else None
+        self.update()
     def set_row_offset(self, value):
         self._scroll_target=max(0,min(max(0,len(self.tracks)*36-self.height()+50),value))
         self._scroll_timer.start()
@@ -239,8 +251,11 @@ class Timeline(QWidget):
         start,end=obj["start"],obj["start"]+obj["duration"]
         if not start < cut < end: return False
         import copy
-        right=copy.deepcopy(obj); right["name"] += " (copia)"; right["start"]=cut; right["duration"]=end-cut
+        right=copy.deepcopy(obj); right["name"] += " (continuación)"; right["start"]=cut; right["duration"]=end-cut
+        # El segmento nuevo es un clip independiente y necesita su propia variable Manim.
+        right.pop("manim_variable", None)
         obj["duration"]=cut-start; self.state["objects"].insert(index+1,right)
+        self._selected_index=index+1
         self.update(); self.on_change(); return True
     def _seek_at(self,x):
         left,_,width,scale=self._geometry(); seconds=self.scroll_offset+(x-left)*scale/width

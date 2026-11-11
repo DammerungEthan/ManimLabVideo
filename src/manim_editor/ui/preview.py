@@ -2,14 +2,14 @@
 import ast
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QFontMetricsF, QIcon, QPainter, QPen,
     QPainterPath, QPixmap, QPolygonF, QTransform,
 )
 from PySide6.QtWidgets import (
     QComboBox, QColorDialog, QDialog, QDialogButtonBox, QFormLayout, QLabel,
-    QLineEdit, QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter,
+    QCheckBox, QLineEdit, QMenu, QPushButton, QScrollBar, QSpinBox, QSplitter,
     QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -31,6 +31,13 @@ class FunctionPlotPreview(QWidget):
         self.expression = "sin(x)"
         self.color = QColor("#65d6ff")
         self.error = ""
+        self.show_grid = True
+        self.show_axes = True
+        self.animation_type = "Create"
+        self.animation_progress = 1.0
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setInterval(30)
+        self._animation_timer.timeout.connect(self._advance_animation_preview)
         self.setMinimumHeight(190)
 
     def set_function(self, expression):
@@ -122,36 +129,72 @@ class FunctionPlotPreview(QWidget):
         self.color = QColor(color)
         self.update()
 
+    def set_grid_visible(self, visible):
+        self.show_grid = bool(visible)
+        self.update()
+
+    def set_axes_visible(self, visible):
+        self.show_axes = bool(visible)
+        self.update()
+
+    def set_animation_type(self, animation_type):
+        self.animation_type = str(animation_type)
+        self.animation_progress = 0.0 if self.animation_type != "None" else 1.0
+        if self.animation_type == "None":
+            self._animation_timer.stop()
+        else:
+            self._animation_timer.start()
+        self.update()
+
+    def _advance_animation_preview(self):
+        self.animation_progress += 0.03
+        if self.animation_progress > 1.0:
+            self.animation_progress = 0.0
+        self.update()
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#101318"))
         plot = QRectF(self.rect()).adjusted(32, 14, -14, -28)
-        painter.setPen(QPen(QColor("#303945"), 1))
-        for index in range(1, 8):
-            x = plot.left() + plot.width() * index / 8
-            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
-        for index in range(1, 4):
-            y = plot.top() + plot.height() * index / 4
-            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-
-        # El área representa x=[-7,7], y=[-4,4], igual que los ejes de Manim.
         zero_y = plot.top() + plot.height() / 2
         zero_x = plot.left() + plot.width() / 2
-        painter.setPen(QPen(QColor("#738093"), 1.2))
-        painter.drawLine(QPointF(plot.left(), zero_y), QPointF(plot.right(), zero_y))
-        painter.drawLine(QPointF(zero_x, plot.top()), QPointF(zero_x, plot.bottom()))
-        for tick in range(-6, 7, 2):
-            tick_x = plot.left() + (tick + 7) * plot.width() / 14
-            painter.drawLine(QPointF(tick_x, zero_y - 3), QPointF(tick_x, zero_y + 3))
-        for tick in (-4, -2, 2, 4):
-            tick_y = zero_y - tick * plot.height() / 8
-            painter.drawLine(QPointF(zero_x - 3, tick_y), QPointF(zero_x + 3, tick_y))
+        if self.show_grid:
+            painter.setPen(QPen(QColor("#303945"), 1))
+            for tick in range(-6, 7, 2):
+                x = plot.left() + (tick + 7) * plot.width() / 14
+                painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+            for tick in range(-4, 5, 2):
+                y = zero_y - tick * plot.height() / 8
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+
+        # El área representa x=[-7,7], y=[-4,4], igual que los ejes de Manim.
+        if self.show_axes:
+            painter.setPen(QPen(QColor("#738093"), 1.2))
+            painter.drawLine(QPointF(plot.left(), zero_y), QPointF(plot.right(), zero_y))
+            painter.drawLine(QPointF(zero_x, plot.top()), QPointF(zero_x, plot.bottom()))
+            for tick in range(-6, 7, 2):
+                tick_x = plot.left() + (tick + 7) * plot.width() / 14
+                painter.drawLine(QPointF(tick_x, zero_y - 3), QPointF(tick_x, zero_y + 3))
+            for tick in (-4, -2, 2, 4):
+                tick_y = zero_y - tick * plot.height() / 8
+                painter.drawLine(QPointF(zero_x - 3, tick_y), QPointF(zero_x + 3, tick_y))
 
         path = QPainterPath()
         started = False
         previous_y = None
-        for point in self.sampled_points():
+        samples = self.sampled_points()
+        progress = self.animation_progress
+        if self.animation_type in {"Create", "Write"}:
+            samples = samples[:max(1, int(len(samples) * progress))]
+        painter.save()
+        if self.animation_type == "FadeIn":
+            painter.setOpacity(progress)
+        elif self.animation_type == "GrowFromCenter":
+            painter.translate(zero_x, zero_y)
+            painter.scale(progress, progress)
+            painter.translate(-zero_x, -zero_y)
+        for point in samples:
             if point is None:
                 started = False
                 previous_y = None
@@ -173,11 +216,13 @@ class FunctionPlotPreview(QWidget):
             previous_y = y_value
         painter.setPen(QPen(self.color, 2.5))
         painter.drawPath(path)
-        painter.setPen(QColor("#c7ced8"))
-        painter.drawText(4, self.height() - 5, "−7")
-        painter.drawText(self.width() - 23, self.height() - 5, "7")
-        painter.drawText(5, 15, "y")
-        painter.drawText(self.width() - 14, int(zero_y) - 4, "x")
+        painter.restore()
+        if self.show_axes:
+            painter.setPen(QColor("#c7ced8"))
+            painter.drawText(4, self.height() - 5, "−7")
+            painter.drawText(self.width() - 23, self.height() - 5, "7")
+            painter.drawText(5, 15, "y")
+            painter.drawText(self.width() - 14, int(zero_y) - 4, "x")
         if self.error:
             painter.setPen(QColor("#ff7b83"))
             painter.drawText(plot.adjusted(8, 8, -8, -8), Qt.AlignmentFlag.AlignCenter,
@@ -568,11 +613,33 @@ class Preview(QWidget):
         function_input = QLineEdit("sin(x)", dialog)
         function_input.setPlaceholderText("Ej.: sin(x) + x^2/5")
         form.addRow("f(x) =", function_input)
+        show_grid = QCheckBox("Mostrar cuadrícula", dialog)
+        show_grid.setChecked(True)
+        show_axes = QCheckBox("Mostrar ejes", dialog)
+        show_axes.setChecked(True)
+        animation_choice = QComboBox(dialog)
+        for label, value in (
+            ("Dibujar (Create)", "Create"),
+            ("Aparecer (FadeIn)", "FadeIn"),
+            ("Escribir (Write)", "Write"),
+            ("Crecer desde el centro", "GrowFromCenter"),
+            ("Sin animación", "None"),
+        ):
+            animation_choice.addItem(label, value)
+        form.addRow("", show_grid)
+        form.addRow("", show_axes)
+        form.addRow("Animación", animation_choice)
         layout.addLayout(form)
 
         plot_preview = FunctionPlotPreview(dialog)
+        plot_preview.set_animation_type(animation_choice.currentData())
         layout.addWidget(plot_preview)
         function_input.textChanged.connect(plot_preview.set_function)
+        show_grid.toggled.connect(plot_preview.set_grid_visible)
+        show_axes.toggled.connect(plot_preview.set_axes_visible)
+        animation_choice.currentIndexChanged.connect(
+            lambda _index: plot_preview.set_animation_type(animation_choice.currentData())
+        )
         syntax_hint = QLabel(
             "Usa x, pi, e y funciones como sin, cos, tan, sqrt, exp y log.", dialog
         )
@@ -655,6 +722,10 @@ class Preview(QWidget):
             "kind": "graph",
             "expression": expression,
             "color": color.name(),
+            "show_grid": show_grid.isChecked(),
+            "show_axes": show_axes.isChecked(),
+            "animation": animation_choice.currentData(),
+            "animation_duration": 1.0,
             "start": start,
             "duration": max(0.1, duration - start),
             "visible": True,
@@ -1089,22 +1160,46 @@ class Preview(QWidget):
                 unit = min(frame_width / 14.222, frame_height / 8) * float(obj.get("scale", 1.0))
                 left, right = x - 7 * unit, x + 7 * unit
                 top, bottom = y - 4 * unit, y + 4 * unit
-                p.setPen(QPen(QColor("#586273"), max(1.0, unit * 0.012)))
-                p.drawLine(QPointF(left, y), QPointF(right, y))
-                p.drawLine(QPointF(x, top), QPointF(x, bottom))
-                for tick in range(-6, 7, 2):
-                    p.drawLine(QPointF(x + tick * unit, y - 3),
-                               QPointF(x + tick * unit, y + 3))
-                for tick in (-4, -2, 2, 4):
-                    p.drawLine(QPointF(x - 3, y - tick * unit),
-                               QPointF(x + 3, y - tick * unit))
+                animation = obj.get("animation", "None")
+                animation_duration = max(0.01, float(obj.get("animation_duration", 1.0)))
+                animation_progress = min(1.0, max(0.0, (now - float(obj.get("start", 0))) / animation_duration))
+                if animation == "None" or now >= float(obj.get("start", 0)) + animation_duration:
+                    animation_progress = 1.0
+                p.save()
+                if animation == "FadeIn":
+                    p.setOpacity(animation_progress)
+                elif animation == "GrowFromCenter":
+                    p.translate(x, y)
+                    p.scale(animation_progress, animation_progress)
+                    p.translate(-x, -y)
+                if obj.get("show_grid", True):
+                    p.setPen(QPen(QColor("#303945"), max(1.0, unit * 0.008)))
+                    for tick in range(-6, 8, 2):
+                        p.drawLine(QPointF(x + tick * unit, top),
+                                   QPointF(x + tick * unit, bottom))
+                    for tick in range(-4, 5, 2):
+                        p.drawLine(QPointF(left, y - tick * unit),
+                                   QPointF(right, y - tick * unit))
+                if obj.get("show_axes", True):
+                    p.setPen(QPen(QColor("#586273"), max(1.0, unit * 0.012)))
+                    p.drawLine(QPointF(left, y), QPointF(right, y))
+                    p.drawLine(QPointF(x, top), QPointF(x, bottom))
+                    for tick in range(-6, 7, 2):
+                        p.drawLine(QPointF(x + tick * unit, y - 3),
+                                   QPointF(x + tick * unit, y + 3))
+                    for tick in (-4, -2, 2, 4):
+                        p.drawLine(QPointF(x - 3, y - tick * unit),
+                                   QPointF(x + 3, y - tick * unit))
 
                 graph_path = QPainterPath()
                 started = False
                 previous_y = None
-                for point in FunctionPlotPreview.sample_expression(
+                graph_points = FunctionPlotPreview.sample_expression(
                     str(obj.get("expression", "sin(x)")).replace("^", "**")
-                ):
+                )
+                if animation in {"Create", "Write"}:
+                    graph_points = graph_points[:max(1, round(len(graph_points) * animation_progress))]
+                for point in graph_points:
                     if point is None:
                         started = False
                         previous_y = None
@@ -1125,6 +1220,7 @@ class Preview(QWidget):
                     previous_y = y_value
                 p.setPen(QPen(QColor(obj.get("color", "#65d6ff")), max(2.0, unit * 0.035)))
                 p.drawPath(graph_path)
+                p.restore()
                 bounds = QRectF(left, top, right - left, bottom - top)
             elif kind == "text":
                 font = QFont(
