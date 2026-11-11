@@ -151,11 +151,11 @@ class MainWindow(QMainWindow):
         self._code_view_dirty=False; self._code_user_editing=False; self._updating_code_view=False
         self.code_view=PythonCodeEditor(); self.code_view.setReadOnly(False); self.code_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._code_highlighter=PythonHighlighter(self.code_view.document())
-        code_font=QFont("monospace", 10); code_font.setStyleHint(QFont.StyleHint.Monospace)
+        code_font=QFont(MANIM_TEXT_FONT, 10)
         self.code_view.setFont(code_font)
         self.code_view.textChanged.connect(self._mark_code_view_edited)
         self.code_view.setPlaceholderText('Escribe una escena Python completa usando Manim.')
-        self.code_view.setStyleSheet('QPlainTextEdit{background:#15171b;color:#d8dee9;border:1px solid #363a40;border-radius:6px;padding:10px;font-family:monospace;font-size:13px;selection-background-color:#365f8c}')
+        self.code_view.setStyleSheet('QPlainTextEdit{background:#15171b;color:#d8dee9;border:1px solid #363a40;border-radius:6px;padding:10px;font-family:sans-serif;font-size:13px;selection-background-color:#365f8c}')
         code_toolbar=QHBoxLayout()
         self.render_code_button=QPushButton('▶ Ejecutar escena')
         self.render_code_button.setToolTip('Ejecutar el código con Manim y actualizar la previsualización')
@@ -1683,7 +1683,7 @@ class MainWindow(QMainWindow):
         error_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         error_text.setStyleSheet(
             'QPlainTextEdit{background:#15171b;color:#d8dee9;border:1px solid #363a40;'
-            'border-radius:6px;padding:8px;font-family:monospace;font-size:12px;'
+            'border-radius:6px;padding:8px;font-family:sans-serif;font-size:12px;'
             'selection-background-color:#365f8c}'
         )
         error_text.setPlainText(str(error) or 'Manim terminó con un error sin incluir detalles.')
