@@ -9,17 +9,19 @@ class Timeline(QWidget):
 
     EDGE = 7
 
-    def __init__(self, state, on_seek, on_change=None):
+    def __init__(self, state, on_seek, on_change=None, on_select=None):
         super().__init__()
         self.state, self.on_seek = state, on_seek
         self.on_change = on_change or (lambda: None)
+        self.on_select = on_select or (lambda index: None)
+        self.selected_index = None
         self.scroll_offset = 0
         self.visible_seconds = 20
         self.row_offset = 0
         self.track_scroll_px = 0
         self.tracks = []
         self.selected_track = None
-        self.position = 38
+        self.position = 3.8
         self._drag_index = None
         self._drag_mode = None
         self._offset = 0
@@ -76,7 +78,8 @@ class Timeline(QWidget):
 
     def paintEvent(self, _event):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor("#151922"))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor("#151922"))
+        p.drawRoundedRect(self.rect(), 10, 10)
         # Dibuja la regla de tiempo y las pistas a partir del estado del proyecto.
         self.tracks=self.state.setdefault("tracks", ["Pista 1"])
         # Repair malformed/legacy projects before drawing: a clip always belongs
@@ -107,6 +110,8 @@ class Timeline(QWidget):
                 if obj.get("track", "Pista 1") != track: continue
                 x,clip_y,w,h=self._clip_rect(track_index,obj)
                 p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(obj["color"])); p.drawRoundedRect(int(x),int(clip_y),int(w),h,5,5)
+                if self.state["objects"].index(obj) == self.selected_index:
+                    p.setPen(QPen(QColor("#f2bd3d"), 2)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawRoundedRect(int(x),int(clip_y),int(w),h,5,5)
                 if not meta.get("visible",True): p.fillRect(int(x),int(clip_y),int(w),h,QColor(17,19,23,150))
                 p.setPen(QColor("#ffffff")); p.drawText(int(x+6),int(clip_y+17),obj["name"][:12])
                 p.setPen(QPen(QColor("#ffffff"),2)); p.drawLine(int(x+4),int(clip_y+5),int(x+4),int(clip_y+19)); p.drawLine(int(x+w-4),int(clip_y+5),int(x+w-4),int(clip_y+19))
@@ -148,6 +153,7 @@ class Timeline(QWidget):
         if i is None:self._seek_at(event.position().x()); return
         self._drag_index,self._drag_mode,self._offset=i,mode,offset
         self._selected_index=i
+        self.selected_index=i; self.on_select(i); self.update()
         obj=self.state["objects"][i]; self._fixed_end=obj["start"]+obj["duration"]
 
     def mouseDoubleClickEvent(self, event):
@@ -227,8 +233,8 @@ class Timeline(QWidget):
         replacement=next(name for name in self.tracks if name!=track)
         for obj in self.state["objects"]:
             if obj.get("track","Pista 1")==track: obj["track"]=replacement
-        self.tracks.remove(track); self.state["track_meta"].pop(track,None)
-        self.state["objects"]=[obj for obj in self.state["objects"] if obj.get("track","Pista 1") != track]
+        self.tracks.remove(track); self.state.setdefault("track_meta",{}).pop(track,None)
+        # Los clips pasan a la pista de reemplazo antes de retirar la pista vacía.
         self.selected_track=replacement; self.update(); self.on_change(); return True
     def zoom(self, factor):
         self.visible_seconds=max(2,min(300,round(self.visible_seconds*factor))); self.update()

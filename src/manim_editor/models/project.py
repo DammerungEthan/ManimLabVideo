@@ -10,9 +10,9 @@ DEFAULT_PROJECT = {
     "height": 1080,
     "tracks": ["Pista 1", "Pista 2", "Pista 3", "Pista 4"],
     "objects": [
-        {"name": "Gráfica seno", "kind": "graph", "expression": "sin(x)", "color": "#65d6ff", "start": 0, "duration": 8, "visible": True, "track": "Pista 1"},
-        {"name": "Ejes", "kind": "axes", "expression": "", "color": "#8290a5", "start": 0, "duration": 10, "visible": True, "track": "Pista 2"},
-        {"name": "Título", "kind": "text", "expression": "f(x) = sin(x)", "color": "#f1f4fa", "start": 0, "duration": 10, "visible": True, "track": "Pista 3"},
+        {"name": "Gráfica seno", "kind": "graph", "expression": "sin(x)", "color": "#65d6ff", "start": 0, "duration": 8, "visible": True, "track": "Pista 1", "position": {"x": 0.52, "y": 0.54}, "scale": 1.0, "rotation": 0.0, "opacity": 1.0, "stroke_width": 3.0},
+        {"name": "Ejes", "kind": "axes", "expression": "", "color": "#8290a5", "start": 0, "duration": 10, "visible": True, "track": "Pista 2", "position": {"x": 0.52, "y": 0.54}, "scale": 1.0, "rotation": 0.0, "opacity": 1.0, "stroke_width": 3.0},
+        {"name": "Título", "kind": "text", "expression": "f(x) = sin(x)", "color": "#f1f4fa", "start": 0, "duration": 10, "visible": True, "track": "Pista 3", "position": {"x": 0.035, "y": 0.08}, "scale": 1.0, "rotation": 0.0, "opacity": 1.0, "stroke_width": 3.0, "font_size": 42},
     ],
 }
 
@@ -36,6 +36,12 @@ def normalize_project(data: dict) -> dict:
         obj.setdefault("color", "#65d6ff")
         obj.setdefault("expression", "")
         obj.setdefault("track", "Pista 1")
+        obj.setdefault("position", {"x": 0.52, "y": 0.54})
+        obj.setdefault("scale", 1.0)
+        obj.setdefault("rotation", 0.0)
+        obj.setdefault("opacity", 1.0)
+        obj.setdefault("stroke_width", 3.0)
+        obj.setdefault("font_size", 42)
         if obj["track"] not in project["tracks"]:
             project["tracks"].append(obj["track"])
     return project

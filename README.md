@@ -2,7 +2,7 @@
 
 Editor de escritorio multiplataforma para crear y editar animaciones con Manim, con una experiencia basada en línea de tiempo y previsualización.
 
-> Estado: prototipo de interfaz. Incluye visor vectorial de ejemplo, controles de reproducción, línea de tiempo esquemática e inspector. Permite elegir formato YouTube horizontal (1920 × 1080) o Reels/Shorts vertical (1080 × 1920). La integración con el motor Manim aún está pendiente.
+> Estado: editor gráfico en desarrollo. Los elementos se crean desde un catálogo, se seleccionan en el preview o el timeline y se ajustan en el inspector lateral. El proyecto ofrece pistas editables, reproducción y formatos YouTube (16:9) y Reels/Shorts (9:16). El preview dibuja una representación vectorial; la exportación/renderizado final con el motor Manim sigue pendiente.
 
 ## Requisitos
 
@@ -41,7 +41,7 @@ En Windows, si el comando `python` no está disponible, prueba `py -m pip instal
 
 ## Desarrollo
 
-La interfaz está construida con PySide6. Manim se integrará como motor de escenas y renderizado en una etapa posterior.
+La interfaz está construida con PySide6. Por ahora, la edición se hace desde controles gráficos; no hay editor de código en la aplicación.
 
 ### Estructura del código
 
@@ -49,11 +49,14 @@ La interfaz está construida con PySide6. Manim se integrará como motor de esce
 src/manim_editor/
 ├── app.py                 # Punto de entrada del comando manim-editor
 ├── models/                # Estado inicial y normalización de proyectos
-├── services/              # Lectura y escritura de proyectos
+├── services/              # Persistencia y servicios del proyecto
 ├── ui/
-│   ├── main_window.py     # Ventana principal y coordinación de la interfaz
+│   ├── main_window.py     # Composición de la ventana y coordinación del estado
+│   ├── element_catalog.py # Catálogo de elementos insertables
+│   ├── inspector.py       # Propiedades editables del clip seleccionado
 │   ├── preview.py         # Dibujo e interacción con los elementos
-│   └── timeline.py        # Pistas, clips y cabezal de reproducción
+│   ├── timeline.py        # Pistas, clips, selección y cabezal de reproducción
+│   └── video_export.py    # Exportación del preview con ffmpeg
 └── icons/                 # Recursos gráficos de la aplicación
 ```
 
