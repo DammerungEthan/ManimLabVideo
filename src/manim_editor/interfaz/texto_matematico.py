@@ -4,7 +4,7 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QWidget
-from manim_editor.typography import MANIM_MATH_FONT, MANIM_TEXT_FONT
+from manim_editor.tipografia import MANIM_MATH_FONT, MANIM_TEXT_FONT
 
 
 GREEK = {

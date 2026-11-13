@@ -47,22 +47,30 @@ La interfaz está construida con PySide6. Por ahora, la edición se hace desde c
 
 ```text
 src/manim_editor/
-├── app.py                 # Punto de entrada del comando manim-editor
-├── typography.py          # Familias tipográficas predeterminadas de Manim
-├── models/                # Estado inicial y normalización de proyectos
-├── services/              # Persistencia y servicios del proyecto
-├── ui/
-│   ├── main_window.py     # Composición de la ventana y coordinación del estado
-│   ├── element_catalog.py # Catálogo de elementos insertables
-│   ├── inspector.py       # Propiedades editables del clip seleccionado
-│   ├── math_text.py       # Formato matemático y preview de ecuaciones
-│   ├── preview.py         # Dibujo e interacción con los elementos
-│   ├── timeline.py        # Pistas, clips, selección y cabezal de reproducción
-│   └── video_export.py    # Exportación del preview con ffmpeg
-└── icons/                 # Recursos gráficos de la aplicación
+├── aplicacion.py          # Punto de entrada de la aplicación
+├── tipografia.py          # Familias tipográficas iniciales de Manim
+├── modelos/
+│   └── proyecto.py        # Estado y normalización de proyectos
+├── servicios/
+│   ├── archivos_proyecto.py # Lectura y escritura de proyectos
+│   └── ejecutor_manim.py  # Ejecución y cancelación de renders Manim
+├── interfaz/
+│   ├── ventana_principal.py       # Composición de la ventana
+│   ├── sincronizador_manim.py     # Sincronización entre código, preview y timeline
+│   ├── analizador_codigo_manim.py # Lectura de escenas Manim
+│   ├── generador_fuente_manim.py  # Generación de código desde cambios gráficos
+│   ├── renderizador_escena_manim.py # Ejecución y recepción de fotogramas
+│   ├── vista_previa.py            # Canvas y dibujo de la escena
+│   ├── interaccion_lienzo.py      # Selección, movimiento, escala y rotación
+│   ├── creador_elementos.py       # Diálogos y alta de objetos
+│   ├── vista_grafica_funcion.py   # Preview aislado de funciones
+│   ├── texto_matematico.py        # Formato y preview de ecuaciones
+│   ├── linea_tiempo.py            # Pistas y clips
+│   └── editor_codigo.py           # Editor y resaltado de sintaxis
+└── icons/                         # Recursos gráficos de la aplicación
 ```
 
-Los cambios de interfaz van en `ui/`, las reglas del formato del proyecto en `models/` y las operaciones de entrada/salida en `services/`. `app.py` solo inicia Qt y muestra `MainWindow`.
+La interfaz vive en `interfaz/`, el formato de proyecto en `modelos/` y las operaciones de entrada/salida en `servicios/`. Cada módulo concentra una responsabilidad para facilitar la edición y ampliación del editor. `aplicacion.py` solo inicia Qt y muestra la ventana principal.
 
 ## Licencia
 

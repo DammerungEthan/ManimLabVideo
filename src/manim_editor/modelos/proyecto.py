@@ -1,6 +1,6 @@
 """Modelo y valores iniciales del formato de proyecto."""
 from copy import deepcopy
-from manim_editor.typography import MANIM_MATH_FONT, MANIM_TEXT_FONT
+from manim_editor.tipografia import MANIM_MATH_FONT, MANIM_TEXT_FONT
 
 DEFAULT_PROJECT = {
     "version": 1,

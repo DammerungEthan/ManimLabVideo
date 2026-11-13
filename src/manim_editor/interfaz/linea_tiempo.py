@@ -2,7 +2,7 @@
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget, QInputDialog
-from manim_editor.typography import MANIM_TEXT_FONT
+from manim_editor.tipografia import MANIM_TEXT_FONT
 
 
 class Timeline(QWidget):

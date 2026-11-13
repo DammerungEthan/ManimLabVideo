@@ -3,7 +3,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from manim_editor.ui.main_window import MainWindow
+from manim_editor.interfaz.ventana_principal import MainWindow
 
 
 def main() -> int:

@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from manim_editor.models.project import normalize_project
+from manim_editor.modelos.proyecto import normalize_project
 
 
 def load_project(path: str | Path) -> dict:
